@@ -1,0 +1,42 @@
+{
+  "savedAt": "2026-07-28T20:49:19.282Z",
+  "duels": 10,
+  "winRate": 1,
+  "wins": 10,
+  "losses": 0,
+  "hpMargin": 7,
+  "adopted": [
+    "tighter spacing",
+    "slower strafe flips",
+    "snappier crit hop",
+    "crits optional",
+    "no shield cycling",
+    "aggressive approach"
+  ],
+  "method": "greedy hill-climb, then confirmed head-to-head against defaults",
+  "params": {
+    "reach": 3,
+    "engageRange": 3.1,
+    "tooClose": 1.8,
+    "pursueRange": 24,
+    "sprintApproachFrom": 5,
+    "cooldownSlackMs": 0,
+    "critJumpHoldMs": 60,
+    "critWindowVy": -0.08,
+    "requireCrit": false,
+    "sprintResetMs": 40,
+    "strafeMinMs": 950,
+    "strafeMaxMs": 2000,
+    "jumpApproachChance": 0.5,
+    "shieldDuringCooldown": false,
+    "shieldRange": 4,
+    "breakOffHp": 6,
+    "healHp": 8,
+    "bowDrawMs": 1150,
+    "bowLeadFactor": 1,
+    "bowDropFactor": 0.055,
+    "creeperShootRange": 9,
+    "creeperHitRunBackoffMs": 750,
+    "creeperMinHp": 14
+  }
+}

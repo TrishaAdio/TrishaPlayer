@@ -33,6 +33,7 @@ import { config } from '../config.js';
 import { log } from '../util/log.js';
 import { equipWeapon, bestWeapon } from '../reflex/gear.js';
 import { mem } from '../world/memory.js';
+import { params, paramSource, sanitise } from './params.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,13 +45,22 @@ const COOLDOWN = {
   default: 500,
 };
 
-const REACH = 3.0;        // vanilla entity reach
-const ENGAGE = 3.4;       // where she likes to sit
-const CRIT_WINDOW = 0.08; // must be descending
+/**
+ * Spacing and timing live in combat/params.js so `scripts/tune.js` can sweep them
+ * with real duels. REACH stays a hard constant: it is a vanilla rule, not a
+ * preference, and letting a tuner raise it would just make her look like a cheat.
+ */
+const REACH = 3.0; // vanilla entity reach — never tunable
 
 export class CombatEngine {
-  constructor(bot, reflex, targeting) {
+  /**
+   * @param paramOverride optional per-instance parameter patch. Exists so the
+   * sparring harness can run two fighters with different profiles inside one
+   * process and duel them against each other.
+   */
+  constructor(bot, reflex, targeting, paramOverride = null) {
     this.bot = bot;
+    this.paramOverride = paramOverride;
     this.reflex = reflex;
     this.targeting = targeting;
     this.active = false;
@@ -62,11 +72,14 @@ export class CombatEngine {
     this.abort = false;
     this.profiles = mem.all.opponents || (mem.all.opponents = {});
     this.kills = 0;
+    this.p = paramOverride ? { ...params(), ...sanitise(paramOverride) } : params();
+    this.swings = 0;
+    log.debug(`combat engine using ${paramOverride ? 'per-instance override' : paramSource()}`);
   }
 
   cooldownMs() {
     const held = this.bot.heldItem?.name;
-    return COOLDOWN[held] ?? COOLDOWN.default;
+    return (COOLDOWN[held] ?? COOLDOWN.default) + (this.p.cooldownSlackMs || 0);
   }
 
   cooldownReady() {
@@ -76,7 +89,7 @@ export class CombatEngine {
   /** Crit conditions: airborne, descending, not sprinting, not in water. */
   canCrit() {
     const e = this.bot.entity;
-    return !e.onGround && e.velocity.y < -CRIT_WINDOW && !e.isInWater;
+    return !e.onGround && e.velocity.y < this.p.critWindowVy && !e.isInWater;
   }
 
   clearControls() {
@@ -124,7 +137,7 @@ export class CombatEngine {
     if (hasBow && hasArrows) {
       log.act('creeper — shooting it from range');
       // Back off first so the shots happen outside blast radius.
-      const away = bot.entity.position.minus(creeper.position).normalize().scaled(9);
+      const away = bot.entity.position.minus(creeper.position).normalize().scaled(this.p.creeperShootRange);
       await bot.lookAt(bot.entity.position.plus(away), true).catch(() => {});
       bot.setControlState('sprint', true);
       bot.setControlState('forward', true);
@@ -139,7 +152,7 @@ export class CombatEngine {
       return res;
     }
 
-    if (bot.health < 14) {
+    if (bot.health < this.p.creeperMinHp) {
       log.act('creeper — not worth it, backing off');
       await this.disengage(creeper);
       return { ok: false, reason: 'avoided creeper' };
@@ -183,7 +196,7 @@ export class CombatEngine {
       await bot.lookAt(bot.entity.position.plus(away), true).catch(() => {});
       bot.setControlState('sprint', true);
       bot.setControlState('forward', true);
-      await wait(750);
+      await wait(this.p.creeperHitRunBackoffMs);
       this.clearControls();
       // Let the fuse reset before going again.
       await wait(this.cooldownMs());
@@ -231,14 +244,14 @@ export class CombatEngine {
         if (Date.now() - started > timeoutMs) return { ok: false, reason: 'fight timed out' };
 
         // Reflex owns survival: if she is in panic, break off and let it work.
-        if (this.reflex.panic && bot.health <= 6) {
+        if (this.reflex.panic && bot.health <= this.p.breakOffHp) {
           log.act('breaking off, too low');
           await this.disengage(live);
           return { ok: false, reason: 'retreated at low hp' };
         }
 
         const dist = bot.entity.position.distanceTo(live.position);
-        if (dist > (pursue ? 24 : 6)) return { ok: false, reason: 'target escaped' };
+        if (dist > (pursue ? this.p.pursueRange : 6)) return { ok: false, reason: 'target escaped' };
 
         await this.combatStep(live, dist, isPlayer);
         await wait(50);
@@ -260,14 +273,16 @@ export class CombatEngine {
     const aim = target.position.offset(0, target.height ? target.height * 0.85 : 1.4, 0);
     await bot.lookAt(aim, true).catch(() => {});
 
+    const p = this.p;
+
     // Ranged mobs: close the gap fast rather than trade arrows.
-    if (dist > ENGAGE) {
+    if (dist > p.engageRange) {
       bot.setControlState('sprint', true);
       bot.setControlState('forward', true);
       bot.setControlState('left', false);
       bot.setControlState('right', false);
       // Sprint-jump to cover ground.
-      if (dist > 8 && bot.entity.onGround && Math.random() < 0.25) {
+      if (dist > p.sprintApproachFrom && bot.entity.onGround && Math.random() < p.jumpApproachChance) {
         bot.setControlState('jump', true);
         setTimeout(() => bot.setControlState('jump', false), 80);
       }
@@ -277,7 +292,8 @@ export class CombatEngine {
     bot.setControlState('forward', false);
 
     // Strafe-circle at reach edge, flipping direction unpredictably.
-    if (Date.now() - this.lastStrafeFlip > 700 + Math.random() * 800) {
+    const flipAfter = p.strafeMinMs + Math.random() * (p.strafeMaxMs - p.strafeMinMs);
+    if (Date.now() - this.lastStrafeFlip > flipAfter) {
       this.strafeDir *= -1;
       this.lastStrafeFlip = Date.now();
     }
@@ -285,7 +301,7 @@ export class CombatEngine {
     bot.setControlState('right', this.strafeDir > 0);
 
     // Too close: back off a touch so she keeps her reach advantage.
-    if (dist < 2.1) {
+    if (dist < p.tooClose) {
       bot.setControlState('back', true);
       setTimeout(() => bot.setControlState('back', false), 120);
     }
@@ -293,7 +309,7 @@ export class CombatEngine {
     const ready = this.cooldownReady();
 
     // Shield up while the cooldown refills, down to swing.
-    if (!ready && bot.inventory.slots[45]?.name === 'shield' && dist < 4) {
+    if (p.shieldDuringCooldown && !ready && bot.inventory.slots[45]?.name === 'shield' && dist < p.shieldRange) {
       if (!this.reflex.blocking) {
         this.reflex.blocking = true;
         bot.activateItem(true);
@@ -306,14 +322,14 @@ export class CombatEngine {
     if (!ready || dist > REACH) return;
 
     // CRIT SETUP: drop sprint (sprinting cancels crits), hop, hit on the way down.
-    if (bot.entity.onGround && !this.jumping) {
+    if (p.requireCrit && bot.entity.onGround && !this.jumping) {
       bot.setControlState('sprint', false);
       bot.setControlState('jump', true);
       this.jumping = true;
       setTimeout(() => {
         bot.setControlState('jump', false);
         this.jumping = false;
-      }, 90);
+      }, p.critJumpHoldMs);
       return; // swing next tick, mid-descent
     }
 
@@ -333,13 +349,14 @@ export class CombatEngine {
     try {
       bot.attack(target);
       this.lastSwing = Date.now();
+      this.swings++;
       if (isPlayer) this.noteOpponent(target, 'myHits');
       log.debug(`swing${crit ? ' (CRIT)' : ''} ${this.bot.heldItem?.name || 'fist'}`);
     } catch {}
 
     // SPRINT RESET: re-engage sprint right after the hit for knockback on the next one.
     bot.setControlState('sprint', false);
-    await wait(40);
+    await wait(this.p.sprintResetMs);
     bot.setControlState('sprint', true);
   }
 
@@ -380,13 +397,13 @@ export class CombatEngine {
 
       const dist = bot.entity.position.distanceTo(live.position);
       const flightTime = dist / 40; // arrow ~40 blocks/s at full draw
-      const lead = live.velocity ? live.velocity.scaled(flightTime * 20) : new Vec3(0, 0, 0);
-      const drop = Math.min(2.2, dist * 0.055); // gravity compensation
+      const lead = live.velocity ? live.velocity.scaled(flightTime * 20 * this.p.bowLeadFactor) : new Vec3(0, 0, 0);
+      const drop = Math.min(2.2, dist * this.p.bowDropFactor); // gravity compensation
       const aim = live.position.offset(0, (live.height || 1.8) * 0.6 + drop, 0).plus(lead);
 
       await bot.lookAt(aim, true).catch(() => {});
       bot.activateItem();
-      await wait(1150); // full draw
+      await wait(this.p.bowDrawMs); // full draw
       bot.deactivateItem();
       await wait(350);
     }

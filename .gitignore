@@ -4,3 +4,6 @@ node_modules/
 logs/
 memory/*.json
 !memory/.gitkeep
+# The tuned combat profile is a measured artefact, not private session state —
+# it ships so a fresh clone fights with the profile the duels actually validated.
+!memory/combat-params.json
