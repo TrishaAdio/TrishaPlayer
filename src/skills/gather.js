@@ -17,6 +17,9 @@ import { goTo, stopMoving } from './move.js';
 const LOG_TYPES = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'pale_oak_log'];
 const TORCH_EVERY = 7;
 
+/** Materials that are always beneath her, never worth travelling to find. */
+const UNDERGROUND = ['stone', 'cobblestone', 'deepslate', 'cobbled_deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'dirt', 'gravel', 'coal_ore', 'deepslate_coal_ore', 'iron_ore', 'deepslate_iron_ore', 'copper_ore', 'deepslate_copper_ore'];
+
 /** Ore names come in stone and deepslate flavours; "iron" should mean both. */
 export function expandBlockNames(bot, name) {
   const mcData = bot.mcData;
@@ -202,6 +205,8 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
   const startedAt = Date.now();
   let lastProgressAt = Date.now();
   let lastReportAt = Date.now();
+  let explores = 0;
+  const MAX_EXPLORES = 2;
   const STALL_MS = 35000;
   const HARD_LIMIT_MS = 150000;
 
@@ -230,7 +235,29 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
     if (!positions.length) {
       misses++;
       if (optional) return { ok: true, detail: `no ${names[0]} nearby`, got };
-      // Nothing visible — dig a bit further out and look again.
+
+      /**
+       * DO NOT GO SIGHTSEEING FOR STONE.
+       *
+       * Stone, dirt and deepslate are under her feet everywhere on the map, so
+       * "search elsewhere" is the wrong answer — she was walking to the ocean and
+       * back looking for cobblestone. Six consecutive explore calls were logged in one
+       * session. If it is an underground material, go DOWN.
+       */
+      if (UNDERGROUND.some((u) => names.includes(u))) {
+        log.act(`no ${names[0]} in reach — digging down for it instead of wandering`);
+        const targetY = Math.max(-58, Math.round(bot.entity.position.y) - 6);
+        await digDown(bot, task, { toY: targetY, staircase: true }).catch((e) => {
+          if (e?.aborted) throw e;
+        });
+        continue;
+      }
+
+      // For genuinely surface-scattered resources, allow a couple of looks and no more.
+      if (explores >= MAX_EXPLORES) {
+        return { ok: got > 0, detail: `mined ${got}x ${names[0]}`, got, reason: `cannot find ${names[0]} anywhere near here` };
+      }
+      explores++;
       const { explore } = await import('./move.js');
       await explore(bot, task, { radius: 32 }).catch(() => {});
       continue;

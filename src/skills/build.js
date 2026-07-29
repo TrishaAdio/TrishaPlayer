@@ -317,7 +317,24 @@ function findGroundNear(bot, pos) {
 /** Bridge across a gap toward a point. */
 export async function bridgeTo(bot, task, { x, y, z }) {
   const dest = new Vec3(x, y, z);
-  log.act(`bridging to ${x},${y},${z}`);
+
+  /**
+   * Check the materials BEFORE stepping out over a gap.
+   *
+   * She was starting bridges with almost nothing in her pack, running dry partway and
+   * ending up stranded on a one-block ledge over open air. Refusing to start is the
+   * correct behaviour when there is no way to finish.
+   */
+  const stock = () => WALL_MATS.reduce((n, m) => n + count(bot, m), 0);
+  const span = Math.ceil(bot.entity.position.distanceTo(dest));
+  if (stock() < Math.min(span, 12)) {
+    await ensureBlocks(bot, task, Math.min(span + 8, GATHER_BATCH)).catch(() => {});
+  }
+  if (stock() < 4) {
+    return { ok: false, reason: `not enough blocks to bridge ${span} blocks (have ${stock()})` };
+  }
+
+  log.act(`bridging to ${x},${y},${z} with ${stock()} blocks for a ${span} block span`);
   let placed = 0;
   let guard = 0;
 

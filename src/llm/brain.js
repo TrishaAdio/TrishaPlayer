@@ -176,6 +176,30 @@ export class Brain {
     this.acceptOrder(message, parsed.actions, parsed.priority === 'interrupt');
   }
 
+  /**
+   * TASK COMMITMENT.
+   *
+   * "i dont know the point what she even wanna do ... random running, do chops, still
+   * again running." That was not one bug, it was the absence of commitment: every new
+   * thought replaced the last, so she started ten things and finished none.
+   *
+   * A plan now gets a minimum window to actually run. RAREAURA can always override —
+   * he is the whole point — and so can a critical emergency. Only her own second
+   * thoughts are made to wait.
+   */
+  committed() {
+    if (!this._commitUntil) return false;
+    if (Date.now() > this._commitUntil) {
+      this._commitUntil = 0;
+      return false;
+    }
+    return true;
+  }
+
+  commit(ms) {
+    this._commitUntil = Date.now() + ms;
+  }
+
   acceptOrder(text, actions, interrupt = true) {
     if (!actions?.length) return;
     // Anything he says invalidates whatever she was planning to do next, and
@@ -670,6 +694,8 @@ export class Brain {
         log.brain(`ladder: ${rung.id} — ${rung.label}`);
         this.plan.push(...actions);
         this.currentRungId = rung.id;
+        // Give the rung a fair run before her own wandering thoughts can replace it.
+        this.commit(45000);
         return;
       }
       this.ladderDone = true;
@@ -690,6 +716,8 @@ export class Brain {
 
     if (this.thinking) return;
     if (Date.now() - this.lastLlmAt < config.brain.thinkIntervalMs) return;
+    // Do not second-guess a task she only just committed to.
+    if (this.committed()) return;
     await this.think({ tier: 'fast' });
   }
 

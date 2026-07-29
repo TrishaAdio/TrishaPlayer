@@ -9,7 +9,7 @@ import { Vec3 } from 'vec3';
 import { config } from '../config.js';
 import { log } from '../util/log.js';
 import { standingDanger, groundBelow, hostilesNear } from '../world/scan.js';
-import { equipShield } from './gear.js';
+import { equipShield, weaponReadyCheck } from './gear.js';
 import { Clutch } from './clutch.js';
 
 const GOOD_FOOD = [
@@ -150,6 +150,12 @@ export class Reflex extends EventEmitter {
 
     // 6. Control hygiene.
     this.controlHygiene();
+
+    // 7. Weapon in hand when something is close.
+    if (!this._weaponCheckAt || Date.now() - this._weaponCheckAt > 1500) {
+      this._weaponCheckAt = Date.now();
+      await weaponReadyCheck(bot).catch(() => {});
+    }
   }
 
   /**

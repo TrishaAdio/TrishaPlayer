@@ -163,6 +163,42 @@ export function toolNearlyBroken(bot, item = bot.heldItem) {
   return item.maxDurability - used <= 12;
 }
 
+/**
+ * KEEP A WEAPON IN HAND WHEN SOMETHING IS CLOSE.
+ *
+ * Reported directly: "its just not holding sword". Mining leaves a pickaxe in her
+ * hand, and if a mob wanders up she would meet it holding a mining tool. This runs
+ * on the reflex tick, so the swap happens before the fight rather than during it.
+ */
+export async function weaponReadyCheck(bot, hostileWithin = 12) {
+  const weapon = bestWeapon(bot);
+  if (!weapon) return false;
+
+  const held = bot.heldItem?.name;
+  const holdingWeapon = /_sword$|_axe$/.test(held || '');
+  if (holdingWeapon) return false;
+
+  const me = bot.entity?.position;
+  if (!me) return false;
+  const threat = Object.values(bot.entities).some((e) => {
+    if (!e?.position || e === bot.entity) return false;
+    if (e.type !== 'mob' && e.type !== 'player') return false;
+    if (e.type === 'player' && e.username === bot.username) return false;
+    return me.distanceTo(e.position) <= hostileWithin;
+  });
+  if (!threat) return false;
+
+  // Do not yank a tool out of her hand mid-swing at a block.
+  if (bot.targetDigBlock) return false;
+
+  try {
+    await bot.equip(weapon, 'hand');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function installGear(bot) {
   let queued = false;
   const schedule = () => {

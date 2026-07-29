@@ -36,8 +36,11 @@ export async function butcher(bot, task, { animal = 'any', count: want = 2 } = {
 
     if (!targets.length) {
       misses++;
+      // One look around, then give up. Wandering the map for livestock is what made
+      // her look aimless.
+      if (misses > 1) return { ok: killed > 0, detail: `killed ${killed}`, got: killed, reason: 'no animals anywhere nearby' };
       const { explore } = await import('./move.js');
-      await explore(bot, task, { radius: 48 }).catch(() => {});
+      await explore(bot, task, { radius: 40 }).catch(() => {});
       continue;
     }
 
@@ -121,12 +124,20 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
       : { ok: false, reason: 'nothing edible around — no animals, crops or fish in range' };
   }
 
+  /**
+   * Two passes, not four.
+   *
+   * Each butcher pass explores when it finds no animals, so four passes meant she
+   * could walk to the ocean and back several times over hunting for a cow. Observed
+   * live as six consecutive "exploring toward" entries. If there is nothing edible
+   * within two sweeps, say so and let the brain choose something else.
+   */
   let guard = 0;
-  while (total(bot, COOKED) + total(bot, RAW) < target && guard++ < 4) {
+  while (total(bot, COOKED) + total(bot, RAW) < target && guard++ < 2) {
     task.check();
     await butcher(bot, task, { count: Math.ceil((target - total(bot, RAW)) / 2) }).catch(() => {});
     if (total(bot, RAW) + total(bot, COOKED) >= target) break;
-    await forageCrops(bot, task, { radius: 48 }).catch(() => {});
+    await forageCrops(bot, task, { radius: 40 }).catch(() => {});
   }
 
   // Cook what she caught — cooked meat is worth roughly double raw.
