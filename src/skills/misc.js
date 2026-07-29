@@ -21,7 +21,18 @@ export async function sleepNow(bot, task) {
     }
   }
   if (!bed) {
-    const made = await craft(bot, task, { item: 'white_bed', count: 1, optional: true });
+    /**
+     * No bed anywhere: go and make one rather than reporting failure.
+     *
+     * Live: "sleep -> FAILED: no bed and nothing to make one from" while there were
+     * sheep on the server. A bed is 3 wool and 3 planks, both of which she can get —
+     * so "I have no bed" is a task, not an excuse.
+     */
+    let made = await craft(bot, task, { item: 'white_bed', count: 1, optional: true });
+    if (!made.ok) {
+      const wool = await getWool(bot, task, { count: 3 }).catch(() => ({ ok: false }));
+      if (wool.ok) made = await craft(bot, task, { item: 'white_bed', count: 1, optional: true });
+    }
     if (made.ok) {
       const { placeAt } = await import('./build.js');
       const spot = bot.entity.position.floored().offset(1, 0, 0);

@@ -20,7 +20,7 @@ import { completeJson, complete, llmStats } from './client.js';
 import { personaCore, personaBrief, CHAT_RULES } from './persona.js';
 import { actionCatalogue, isValidAction } from '../actions.js';
 import { currentRung, ladderProgress } from '../progression.js';
-import { fastParse, llmParse, smallTalk, addressedToHer } from '../chat/commands.js';
+import { fastParse, llmParse, smallTalk, addressedToHer, looksLikeQuestion } from '../chat/commands.js';
 import { nearbyEntities } from '../world/scan.js';
 
 export class Brain {
@@ -157,6 +157,13 @@ export class Brain {
       return;
     }
 
+    // A question deserves an answer, not a work order.
+    if (looksLikeQuestion(message)) {
+      const reply = await smallTalk(this.bot, username, message, this.stateText());
+      this.say(reply || 'not sure');
+      return;
+    }
+
     // Slow path: let the model work out what he meant.
     const parsed = await llmParse(this.bot, username, message, this.stateText());
     if (!parsed || !parsed.actions.length) {
@@ -244,9 +251,37 @@ export class Brain {
       const now = Date.now();
       const pos = this.bot.entity.position;
 
-      const moved = !this._lastPos || this._lastPos.distanceTo(pos) > 0.6;
-      this._lastPos = pos.clone();
-      if (moved) this._stillSince = now;
+      /**
+       * Progress, not just movement.
+       *
+       * Watching position alone produced a false positive that cancelled a legitimate
+       * shelter build: "stuck: shelter has run 28s without moving" — of course it was
+       * not moving, it was placing blocks around her. Mining, crafting, smelting,
+       * fishing and building are all productive while stationary. So the signature
+       * includes what she has done, not only where she is.
+       */
+      const sig = [
+        Math.round(pos.x), Math.round(pos.y), Math.round(pos.z),
+        mem.stats.blocksMined, mem.stats.itemsCrafted, mem.stats.kills,
+        this.bot.inventory.items().reduce((n, i) => n + i.count, 0),
+        Math.round(this.bot.health ?? 0),
+      ].join(',');
+
+      const progressed = sig !== this._lastSig;
+      this._lastSig = sig;
+      if (progressed) this._stillSince = now;
+
+      // Remember where he was last seen, so "come here" still works after he walks
+      // out of entity range. Without this she simply answers "cant see you".
+      const owner = this.bot.players[config.owner]?.entity;
+      if (owner?.position) {
+        mem.set('ownerLastSeen', {
+          x: Math.round(owner.position.x),
+          y: Math.round(owner.position.y),
+          z: Math.round(owner.position.z),
+          at: now,
+        });
+      }
 
       const busy = this.executor.busy;
       const holding = this.holdUntil && now < this.holdUntil;
@@ -255,12 +290,12 @@ export class Brain {
       // Case 1: an action is running but she is frozen in place.
       if (busy && now - this._stillSince > STUCK_AFTER) {
         const name = this.executor.currentName;
-        // Sleeping, waiting and smelting are legitimately motionless.
-        if (['sleep', 'idle', 'smelt', 'craft', 'heal', 'deposit', 'withdraw', 'enchant'].includes(name)) {
+        // Actions that are legitimately motionless AND make no inventory change.
+        if (['sleep', 'idle', 'fish', 'smelt'].includes(name)) {
           this._stillSince = now;
           return;
         }
-        log.warn(`stuck: ${name} has run ${Math.round((now - this._stillSince) / 1000)}s without moving — unsticking`);
+        log.warn(`stuck: ${name} has made no progress for ${Math.round((now - this._stillSince) / 1000)}s — unsticking`);
         await this.unstick().catch(() => {});
         this.executor.cancel('stuck');
         this._stillSince = now;

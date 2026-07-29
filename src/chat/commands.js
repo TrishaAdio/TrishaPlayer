@@ -192,6 +192,27 @@ const RULES = [
   },
 ];
 
+/**
+ * Is this a question rather than an instruction?
+ *
+ * Live example: "trisha in minecraft nights are how min long?" — she answered it
+ * correctly ("nights are 10 mins") and then abandoned her job to go build a shelter
+ * and sleep, because the intent parser turned a trivia question into a work order.
+ *
+ * Command verbs win over question marks, so "can you go chop some trees?" is still an
+ * order. Only genuinely answer-shaped messages are treated as conversation.
+ */
+const COMMAND_VERBS = /\b(come|follow|attack|kill|fight|defend|protect|guard|get|bring|give|gimme|make|build|craft|mine|chop|dig|go|goto|explore|farm|plant|harvest|fish|sleep|stop|wait|hunt|deposit|store|light|torch|equip|gear|heal|retreat|home|return|help me|shoot|kite|enchant|upgrade|smelt|cook)\b/;
+const QUESTION_WORDS = /^(how|what|why|when|where|who|which|is|are|was|were|do|does|did|can|could|would|should|will|whats|whos|hows)\b/;
+
+export function looksLikeQuestion(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (!t) return false;
+  const hasQuestionShape = t.includes('?') || QUESTION_WORDS.test(t);
+  if (!hasQuestionShape) return false;
+  return !COMMAND_VERBS.test(t);
+}
+
 /** Try the instant path. Returns null if nothing matched. */
 export function fastParse(bot, username, message) {
   const raw = normalise(bot, message);

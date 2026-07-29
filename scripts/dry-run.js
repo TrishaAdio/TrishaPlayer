@@ -7,7 +7,7 @@
  *
  * Run: npm run dry
  */
-import { fastParse } from '../src/chat/commands.js';
+import { fastParse, looksLikeQuestion } from '../src/chat/commands.js';
 import { ACTIONS, isValidAction, actionCatalogue } from '../src/actions.js';
 import { LADDER, currentRung, ladderProgress, ladderStatus } from '../src/progression.js';
 import { config } from '../src/config.js';
@@ -67,7 +67,25 @@ for (const [text, expected] of CASES) {
   ok(first === expected || (expected === 'stop' && parsed?.stopOnly), `"${text}"`, `-> ${chain}`);
 }
 
-console.log('\n2. STATUS QUERIES (answer, no action)\n');
+console.log('\n2. QUESTIONS ARE CONVERSATION, NOT ORDERS\n');
+// Live regression: "in minecraft nights are how min long?" made her abandon her job
+// to go build a shelter and sleep. Command verbs must still beat question marks.
+for (const [text, expected] of [
+  ['in minecraft nights are how min long?', true],
+  ['how many woods u have', true],
+  ['what are you doing', true],
+  ['do you love me?', true],
+  ['where are you', true],
+  ['can you go chop some trees?', false],
+  ['trisha come here', false],
+  ['give me 3 woods', false],
+  ['go get diamonds', false],
+  ['quote of the day', false],
+]) {
+  ok(looksLikeQuestion(text) === expected, `"${text}"`, `question=${looksLikeQuestion(text)}`);
+}
+
+console.log('\n3. STATUS QUERIES (answer, no action)\n');
 for (const q of ['wyd', 'status', 'trisha hp', 'where are you']) {
   const parsed = fastParse(fakeBot, config.owner, q);
   ok(parsed?.statusQuery === true, `"${q}"`, '-> status reply');

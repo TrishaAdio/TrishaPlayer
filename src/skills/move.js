@@ -147,8 +147,30 @@ export function ownerEntity(bot) {
  * which is good enough — being 3 blocks under him is arriving.
  */
 export async function come(bot, task, { range = 2 } = {}) {
-  const owner = ownerEntity(bot);
-  if (!owner) return { ok: false, reason: `cannot see ${config.owner}` };
+  let owner = ownerEntity(bot);
+
+  /**
+   * He is often out of entity range when he calls her — entities only load within a
+   * few chunks, so from across the base she answered "cant see you" and did nothing.
+   * If he is online, walk to where he was last seen and look again on arrival; by
+   * then he is usually loaded and the normal approach takes over.
+   */
+  if (!owner) {
+    const online = !!bot.players[config.owner];
+    const last = mem.all.ownerLastSeen;
+    if (!online) return { ok: false, reason: `${config.owner} is not online` };
+    if (!last) return { ok: false, reason: `cannot see ${config.owner} and have never seen him` };
+
+    log.act(`${config.owner} is out of range — heading to where he was last seen`);
+    const approach = await goTo(bot, task, last.x, last.y, last.z, { range: 4, timeoutMs: 120000 });
+    task.check();
+    owner = ownerEntity(bot);
+    if (!owner) {
+      return approach.ok
+        ? { ok: false, reason: `got to where you were but cannot find you` }
+        : { ok: false, reason: `cannot reach where you were last seen` };
+    }
+  }
 
   const res = await goTo(bot, task, owner.position.x, owner.position.y, owner.position.z, { range });
   if (res.ok) return { ok: true, detail: 'arrived' };
