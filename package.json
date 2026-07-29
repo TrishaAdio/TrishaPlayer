@@ -7,7 +7,11 @@
   "scripts": {
     "start": "node src/index.js",
     "probe": "node scripts/probe-llm.js",
-    "dry": "node scripts/dry-run.js"
+    "dry": "node scripts/dry-run.js",
+    "spar": "node scripts/spar.js",
+    "tune": "node scripts/tune.js",
+    "bench": "node scripts/bench.js",
+    "netherite-test": "node scripts/netherite-test.js"
   },
   "engines": {
     "node": ">=20"

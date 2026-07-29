@@ -19,6 +19,13 @@ const ARMOR_SLOTS = [
 ];
 
 const WEAPON_ORDER = ['netherite_sword', 'diamond_sword', 'iron_sword', 'netherite_axe', 'diamond_axe', 'stone_sword', 'iron_axe', 'golden_sword', 'stone_axe', 'wooden_sword', 'wooden_axe'];
+
+/**
+ * Axes, best first. Kept separate from WEAPON_ORDER because the axe is a tactical
+ * choice, not a fallback: it hits harder per swing and, crucially, disables a
+ * shield for five seconds. Against anyone who blocks, that is the opener.
+ */
+const AXE_WEAPON_ORDER = ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe'];
 const PICK_ORDER = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'golden_pickaxe', 'wooden_pickaxe'];
 const AXE_ORDER = ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe'];
 const SHOVEL_ORDER = ['netherite_shovel', 'diamond_shovel', 'iron_shovel', 'stone_shovel', 'golden_shovel', 'wooden_shovel'];
@@ -32,6 +39,20 @@ const findFirst = (bot, order) => {
 };
 
 export const bestWeapon = (bot) => findFirst(bot, WEAPON_ORDER);
+export const bestAxeWeapon = (bot) => findFirst(bot, AXE_WEAPON_ORDER);
+export const bestSword = (bot) => findFirst(bot, ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword']);
+
+/** Swap the held weapon without disturbing armour or the off-hand. */
+export async function equipNamed(bot, item) {
+  if (!item) return false;
+  if (bot.heldItem?.name === item.name) return true;
+  try {
+    await bot.equip(item, 'hand');
+    return true;
+  } catch {
+    return false;
+  }
+}
 export const bestPickaxe = (bot) => findFirst(bot, PICK_ORDER);
 export const bestAxe = (bot) => findFirst(bot, AXE_ORDER);
 export const bestShovel = (bot) => findFirst(bot, SHOVEL_ORDER);

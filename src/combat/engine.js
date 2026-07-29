@@ -31,9 +31,10 @@
 import { Vec3 } from 'vec3';
 import { config } from '../config.js';
 import { log } from '../util/log.js';
-import { equipWeapon, bestWeapon } from '../reflex/gear.js';
+import { equipWeapon, bestWeapon, bestAxeWeapon, bestSword, equipNamed } from '../reflex/gear.js';
 import { mem } from '../world/memory.js';
 import { params, paramSource, sanitise } from './params.js';
+import { aimSolution, hasClearShot, ARROW_SPEED } from './ranged.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -74,6 +75,11 @@ export class CombatEngine {
     this.kills = 0;
     this.p = paramOverride ? { ...params(), ...sanitise(paramOverride) } : params();
     this.swings = 0;
+    // Shield-break bookkeeping.
+    this.swingsSinceLand = 0;
+    this.usingAxe = false;
+    this.shieldBrokenUntil = 0;
+    this.arrowsFired = 0;
     log.debug(`combat engine using ${paramOverride ? 'per-instance override' : paramSource()}`);
   }
 
@@ -98,6 +104,66 @@ export class CombatEngine {
     }
   }
 
+  /**
+   * AXE DOCTRINE — the answer to anyone who hides behind a shield.
+   *
+   * A shield negates a sword hit entirely, so against a blocker a sword duel is
+   * unwinnable no matter how good the timing is. An axe hit disables the shield for
+   * five seconds. So: open with the axe to break the block, then switch back to the
+   * sword, which out-damages the axe over time thanks to its faster cooldown.
+   *
+   * Detection is behavioural rather than metadata-based, because the "hand active"
+   * bit moves between protocol versions but "my hits are landing on nothing" is
+   * true in every version. Two swings with no damage registered on a target that is
+   * holding a shield means the shield is up.
+   */
+  targetHasShield(target) {
+    try {
+      return target?.equipment?.some((e) => e?.name === 'shield') || false;
+    } catch {
+      return false;
+    }
+  }
+
+  targetIsBlocking(target) {
+    if (!this.targetHasShield(target)) return false;
+    if (Date.now() < this.shieldBrokenUntil) return false; // already broken
+    return this.swingsSinceLand >= 2;
+  }
+
+  shouldUseAxe(target, isPlayer) {
+    if (!isPlayer) return false;
+    const axe = bestAxeWeapon(this.bot);
+    if (!axe) return false;
+    if (Date.now() < this.shieldBrokenUntil) return false; // window is open, use the sword
+
+    if (this.targetIsBlocking(target)) return true;
+
+    // Someone who blocked in past fights gets the axe from the first swing.
+    const profile = this.profileFor(target);
+    if (profile && (profile.theyBlock || 0) >= 2 && this.swings < 2) return true;
+    return false;
+  }
+
+  async armFor(target, isPlayer) {
+    const wantAxe = this.shouldUseAxe(target, isPlayer);
+    if (!this.p.useAxe) return; // sparring archetypes that do not know the trick
+    if (wantAxe && !this.usingAxe) {
+      const axe = bestAxeWeapon(this.bot);
+      if (await equipNamed(this.bot, axe)) {
+        this.usingAxe = true;
+        this.noteOpponent(target, 'theyBlock');
+        log.act(`shield up — switching to ${axe.name} to break it`);
+      }
+    } else if (!wantAxe && this.usingAxe) {
+      const sword = bestSword(this.bot);
+      if (sword && (await equipNamed(this.bot, sword))) {
+        this.usingAxe = false;
+        log.debug('shield broken, back to the sword');
+      }
+    }
+  }
+
   /** Opponent habits, per username, remembered across sessions. */
   profileFor(entity) {
     if (!entity?.username) return null;
@@ -112,6 +178,70 @@ export class CombatEngine {
     if (p) {
       p[key] = (p[key] || 0) + by;
       mem.set('opponents', this.profiles);
+    }
+  }
+
+  /**
+   * OPPONENT MODELLING — profiles that change behaviour, not just statistics.
+   *
+   * Recording that someone blocks a lot is worthless on its own. This turns the
+   * record into a per-fight parameter patch and an opening plan, so the second time
+   * she meets a player she already fights them differently.
+   *
+   * A human needs twenty fights to read a pattern. She needs two, and never forgets.
+   */
+  strategyFor(target) {
+    const profile = this.profileFor(target);
+    if (!profile || (profile.fights || 0) < 1) return { patch: {}, notes: [] };
+
+    const patch = {};
+    const notes = [];
+    const fights = Math.max(1, profile.fights);
+    const lost = profile.losses || 0;
+
+    // Blocks constantly -> the axe opener is already handled in shouldUseAxe.
+    if ((profile.theyBlock || 0) >= 2) notes.push('shield camper: axe opener');
+
+    // Runs away -> chase harder and further, and stop giving them space.
+    if ((profile.theyRetreat || 0) / fights > 0.5) {
+      patch.pursueRange = 32;
+      patch.engageRange = Math.max(2.9, (this.p.engageRange || 3.1) - 0.2);
+      patch.jumpApproachChance = 0.6;
+      notes.push('runner: tighter pursuit');
+    }
+
+    // Jumps a lot -> they are chasing crits. Sit slightly wider so their jump
+    // arc lands short, and punish the recovery frames.
+    if ((profile.theyJump || 0) / fights > 3) {
+      patch.engageRange = (this.p.engageRange || 3.1) + 0.25;
+      patch.strafeMinMs = 500;
+      notes.push('jumper: wider spacing');
+    }
+
+    // She has been losing to this one -> stop trading, kite and reset instead.
+    if (lost >= 2 && lost > (profile.wins || 0)) {
+      patch.breakOffHp = Math.max(8, (this.p.breakOffHp || 6) + 3);
+      patch.tooClose = (this.p.tooClose || 1.8) + 0.4;
+      notes.push('beat her before: more caution, earlier resets');
+    }
+
+    return { patch, notes };
+  }
+
+  /** Apply an opponent-specific patch for the duration of one fight. */
+  applyStrategy(target) {
+    const { patch, notes } = this.strategyFor(target);
+    this._basePatch = null;
+    if (!Object.keys(patch).length) return;
+    this._basePatch = this.p;
+    this.p = { ...this.p, ...sanitise(patch) };
+    log.act(`read on ${target.username}: ${notes.join(', ')}`);
+  }
+
+  restoreStrategy() {
+    if (this._basePatch) {
+      this.p = this._basePatch;
+      this._basePatch = null;
     }
   }
 
@@ -227,9 +357,31 @@ export class CombatEngine {
     const isPlayer = target.type === 'player';
     const profile = this.profileFor(target);
     if (profile) profile.fights++;
+    // Fight this specific person the way they have shown they play.
+    if (isPlayer) this.applyStrategy(target);
+    let theirJumps = 0;
+    let theirRetreatTicks = 0;
 
     await equipWeapon(bot).catch(() => {});
     log.act(`engaging ${target.username || target.name}${isPlayer ? ' (PLAYER)' : ''}`);
+
+    /**
+     * Damage feedback. Without this she cannot tell a blocked hit from a landed one,
+     * and the whole shield-break decision has nothing to run on.
+     */
+    this.swingsSinceLand = 0;
+    this.usingAxe = false;
+    this.shieldBrokenUntil = 0;
+    const onHurt = (entity) => {
+      if (entity?.id !== target.id) return;
+      this.swingsSinceLand = 0;
+      if (this.usingAxe) {
+        // An axe hit that lands disables their shield for five seconds.
+        this.shieldBrokenUntil = Date.now() + 5000;
+        log.debug('axe landed — shield disabled for 5s');
+      }
+    };
+    bot.on('entityHurt', onHurt);
 
     try {
       while (!this.abort) {
@@ -251,13 +403,31 @@ export class CombatEngine {
         }
 
         const dist = bot.entity.position.distanceTo(live.position);
-        if (dist > (pursue ? this.p.pursueRange : 6)) return { ok: false, reason: 'target escaped' };
+        if (dist > (pursue ? this.p.pursueRange : 6)) {
+          if (isPlayer) this.noteOpponent(target, 'theyRetreat');
+          return { ok: false, reason: 'target escaped' };
+        }
+
+        // Observe them while fighting: this is what feeds the next fight.
+        if (isPlayer) {
+          if (!live.onGround && (live.velocity?.y ?? 0) > 0.1) theirJumps++;
+          const openingUp = bot.entity.position.distanceTo(live.position) > dist;
+          if (openingUp) theirRetreatTicks++;
+        }
 
         await this.combatStep(live, dist, isPlayer);
         await wait(50);
       }
       return { ok: false, reason: 'aborted' };
     } finally {
+      // Bank what she learned about them, then drop the per-fight tuning.
+      if (isPlayer && profile) {
+        if (theirJumps > 0) this.noteOpponent(target, 'theyJump', Math.min(20, Math.round(theirJumps / 10)));
+        if (theirRetreatTicks > 40) this.noteOpponent(target, 'theyRetreat');
+        if (bot.health <= 0) profile.losses = (profile.losses || 0) + 1;
+      }
+      this.restoreStrategy();
+      bot.removeListener('entityHurt', onHurt);
       this.clearControls();
       this.active = false;
       this.target = null;
@@ -269,9 +439,20 @@ export class CombatEngine {
   async combatStep(target, dist, isPlayer) {
     const bot = this.bot;
 
+    // Handicaps exist so a sparring partner can be made human-like. Both are zero
+    // for Trisha herself, so this costs her nothing.
+    if (this.p.reactionDelayMs > 0) await wait(this.p.reactionDelayMs);
+
     // Always face the hitbox centre-mass.
     const aim = target.position.offset(0, target.height ? target.height * 0.85 : 1.4, 0);
-    await bot.lookAt(aim, true).catch(() => {});
+    if (this.p.aimErrorDeg > 0) {
+      const err = (this.p.aimErrorDeg * Math.PI) / 180;
+      const jx = (Math.random() - 0.5) * 2 * err * dist;
+      const jz = (Math.random() - 0.5) * 2 * err * dist;
+      await bot.lookAt(aim.offset(jx, 0, jz), true).catch(() => {});
+    } else {
+      await bot.lookAt(aim, true).catch(() => {});
+    }
 
     const p = this.p;
 
@@ -319,6 +500,9 @@ export class CombatEngine {
       bot.deactivateItem();
     }
 
+    // Pick the right weapon for what they are doing right now.
+    if (isPlayer && ready) await this.armFor(target, isPlayer);
+
     if (!ready || dist > REACH) return;
 
     // CRIT SETUP: drop sprint (sprinting cancels crits), hop, hit on the way down.
@@ -345,11 +529,19 @@ export class CombatEngine {
       bot.deactivateItem();
       await wait(30);
     }
+    // Fumbled clicks, for human-like sparring partners only.
+    if (this.p.missChance > 0 && Math.random() < this.p.missChance) {
+      this.lastSwing = Date.now();
+      this.swingsSinceLand++;
+      return;
+    }
+
     const crit = this.canCrit();
     try {
       bot.attack(target);
       this.lastSwing = Date.now();
       this.swings++;
+      this.swingsSinceLand++;
       if (isPlayer) this.noteOpponent(target, 'myHits');
       log.debug(`swing${crit ? ' (CRIT)' : ''} ${this.bot.heldItem?.name || 'fist'}`);
     } catch {}
@@ -391,24 +583,102 @@ export class CombatEngine {
     if (!arrows) return { ok: false, reason: 'no arrows' };
 
     await bot.equip(bow, 'hand');
+    let fired = 0;
+    let blocked = 0;
+
     for (let i = 0; i < shots && !this.abort; i++) {
       const live = bot.entities[target.id];
-      if (!live || live.isValid === false) return { ok: true, killed: true };
+      if (!live || live.isValid === false) return { ok: true, killed: true, detail: `${fired} arrows fired` };
+
+      /**
+       * Solved trajectory, not an estimate: the pitch comes from simulating the
+       * arrow tick-by-tick with drag and gravity, and the lead is iterated against
+       * the resulting flight time. Accurate to under a hundredth of a block out to
+       * 60 blocks, which is far tighter than a player hitbox.
+       */
+      const sol = aimSolution(bot, live, {
+        speed: ARROW_SPEED,
+        leadFactor: this.p.bowLeadFactor,
+        passes: 3,
+      });
+      if (!sol) {
+        await wait(200);
+        continue;
+      }
+
+      // Don't put arrows into terrain.
+      if (!hasClearShot(bot, live, sol)) {
+        blocked++;
+        if (blocked >= 3) {
+          await equipWeapon(bot).catch(() => {});
+          return { ok: false, reason: 'no clear shot', detail: `${fired} arrows fired` };
+        }
+        // Sidestep and try to open the lane.
+        bot.setControlState(this.strafeDir > 0 ? 'right' : 'left', true);
+        await wait(350);
+        this.clearControls();
+        continue;
+      }
+
+      // Draw first, aim at the moment of release: the target keeps moving while
+      // the bow charges, so aiming before the draw would be aiming at history.
+      bot.activateItem();
+      await wait(Math.max(1000, this.p.bowDrawMs)); // full power needs a full second
+
+      const finalTarget = bot.entities[target.id];
+      if (finalTarget) {
+        const release = aimSolution(bot, finalTarget, {
+          speed: ARROW_SPEED,
+          leadFactor: this.p.bowLeadFactor,
+          passes: 2,
+        });
+        if (release) await bot.look(release.yaw, release.pitch, true).catch(() => {});
+      }
+      bot.deactivateItem();
+      fired++;
+      this.arrowsFired = (this.arrowsFired || 0) + 1;
+      log.debug(`arrow ${fired}: ${sol.distance.toFixed(1)}m, pitch ${(sol.pitch * 180 / Math.PI).toFixed(1)}deg, flight ${sol.flightSeconds.toFixed(2)}s`);
+
+      await wait(250);
+      if (!bot.inventory.items().some((i) => /arrow/.test(i.name))) break;
+    }
+
+    await equipWeapon(bot).catch(() => {});
+    return { ok: fired > 0, detail: `${fired} arrows fired` };
+  }
+
+  /**
+   * BOW KITING. Stay outside their reach, keep arrows going in.
+   * Only worth it while she actually has range on them; the moment they close, the
+   * sword is the better tool and the melee loop takes over.
+   */
+  async kite(target, { maxShots = 8, keepDistance = 10 } = {}) {
+    const bot = this.bot;
+    const hasArrows = bot.inventory.items().some((i) => /arrow/.test(i.name));
+    if (!hasArrows) return { ok: false, reason: 'no arrows to kite with' };
+
+    for (let i = 0; i < maxShots && !this.abort; i++) {
+      const live = bot.entities[target.id];
+      if (!live) return { ok: true, killed: true };
 
       const dist = bot.entity.position.distanceTo(live.position);
-      const flightTime = dist / 40; // arrow ~40 blocks/s at full draw
-      const lead = live.velocity ? live.velocity.scaled(flightTime * 20 * this.p.bowLeadFactor) : new Vec3(0, 0, 0);
-      const drop = Math.min(2.2, dist * this.p.bowDropFactor); // gravity compensation
-      const aim = live.position.offset(0, (live.height || 1.8) * 0.6 + drop, 0).plus(lead);
-
-      await bot.lookAt(aim, true).catch(() => {});
-      bot.activateItem();
-      await wait(this.p.bowDrawMs); // full draw
-      bot.deactivateItem();
-      await wait(350);
+      if (dist < keepDistance * 0.6) {
+        // Back off to re-open the gap, facing them the whole time.
+        const away = bot.entity.position.minus(live.position).normalize().scaled(6);
+        await bot.lookAt(bot.entity.position.plus(away), true).catch(() => {});
+        bot.setControlState('sprint', true);
+        bot.setControlState('forward', true);
+        await wait(600);
+        this.clearControls();
+        if (bot.entity.position.distanceTo(live.position) < 4) {
+          return { ok: false, reason: 'they closed the gap' };
+        }
+      }
+      const res = await this.shoot(live, { shots: 1 });
+      if (res.killed) return { ok: true, killed: true };
+      if (!res.ok && res.reason === 'no arrows') break;
     }
-    await equipWeapon(bot).catch(() => {});
-    return { ok: true };
+    return { ok: true, detail: 'kited' };
   }
 
   /** Player duel: same engine, tighter and more aggressive, uses their profile. */

@@ -284,10 +284,13 @@ export const ACTIONS = {
       let guard = 0;
       const startHp = bot.health;
       while (bot.health < 18 && guard++ < 40 && !task.aborted) {
-        await reflex.eatCheck().catch(() => {});
+        // Eat up to a full bar first — regeneration will not start below 18 food,
+        // and the passive eat reflex deliberately ignores raw meat until starving.
+        if (bot.food < 18) await reflex.forceEat().catch(() => {});
+        else await reflex.eatCheck().catch(() => {});
         await task.sleep(1000);
-        if (guard > 8 && bot.health <= startHp && bot.food < 18) {
-          return { ok: false, reason: 'not regenerating — food too low' };
+        if (guard > 10 && bot.health <= startHp && bot.food < 18 && !reflex.bestFood(true)) {
+          return { ok: false, reason: 'out of food — cannot regenerate' };
         }
       }
       return { ok: true, detail: `hp ${Math.round(bot.health)}/20` };
@@ -398,6 +401,25 @@ export const ACTIONS = {
     group: 'endgame',
     describe: 'netheriteIngot{count} smelt debris to scrap and craft ingots',
     run: ({ bot, task }, a) => nether.makeNetheriteIngot(bot, task, { count: num(a.count, 1) }),
+  },
+  upgradeNetherite: {
+    group: 'endgame',
+    describe: 'upgradeNetherite{item} smithing-table upgrade of a diamond item to netherite',
+    run: ({ bot, task }, a) => nether.upgradeNetherite(bot, task, { item: a.item ? str(a.item) : null }),
+  },
+  raidBastion: {
+    group: 'endgame',
+    describe: 'raidBastion{} loot bastion chests for the netherite upgrade template',
+    run: ({ bot, task }, a) => nether.raidBastion(bot, task, { searchRadius: num(a.searchRadius, 96) }),
+  },
+  kite: {
+    group: 'combat',
+    describe: 'kite{target,shots} keep range with the bow, back off if they close',
+    run: async ({ combat, targeting }, a) => {
+      const target = targeting.resolve(str(a.target, 'nearest')) || targeting.pick();
+      if (!target) return { ok: false, reason: 'nothing to kite' };
+      return combat.kite(target, { maxShots: num(a.shots, 8), keepDistance: num(a.distance, 10) });
+    },
   },
 
   // ── meta ───────────────────────────────────────────────────

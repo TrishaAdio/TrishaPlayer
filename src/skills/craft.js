@@ -67,15 +67,20 @@ async function ensurePlanks(bot, task, needed = 4) {
 async function ensureSticks(bot, task, needed = 2) {
   if (count(bot, 'stick') >= needed) return true;
   await ensurePlanks(bot, task, 2);
+  await wait(250); // let the plank craft land before asking what is craftable
   const id = bot.mcData.itemsByName.stick.id;
   const recipes = bot.recipesFor(id, null, 1, null);
   if (!recipes.length) return false;
-  try {
-    await bot.craft(recipes[0], Math.ceil(needed / 4), null);
-    return true;
-  } catch {
-    return false;
+  // Try each variant: the first may want a plank type she does not have.
+  for (const recipe of recipes) {
+    try {
+      await bot.craft(recipe, Math.ceil(needed / 4), null);
+      return true;
+    } catch {
+      /* next variant */
+    }
   }
+  return false;
 }
 
 /** A crafting table within reach — found, placed, or crafted then placed. */
@@ -184,42 +189,81 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
   }
 
   if (!recipes.length) {
-    // Work out what's missing so the failure is actionable.
     const all = bot.recipesAll(id, null, table);
-    if (!all.length) return { ok: !!optional, reason: `${name} is not craftable` };
-    const missing = missingFor(bot, all[0]);
 
-    if (depth < 2 && missing.length) {
-      for (const m of missing) {
-        task.check();
-        const sub = await craft(bot, task, { item: m.name, count: m.need, optional: true, depth: depth + 1 });
-        if (!sub.ok) log.debug(`sub-craft ${m.name} failed: ${sub.reason || ''}`);
+    if (!all.length) {
+      // Distinguish "impossible" from "needs a bench" — the old message claimed
+      // wooden_pickaxe was not craftable, which was simply wrong and unactionable.
+      if (!table) {
+        const bench = await ensureCraftingTable(bot, task);
+        if (bench) {
+          const retry = bot.recipesFor(id, null, 1, bench);
+          if (retry.length) {
+            recipes = retry;
+            table = bench;
+          }
+        }
+        if (!recipes.length) return { ok: !!optional, reason: `${name} needs a crafting table` };
+      } else {
+        return { ok: !!optional, reason: `${name} is not craftable` };
       }
-      recipes = bot.recipesFor(id, null, 1, table || undefined);
     }
 
     if (!recipes.length) {
-      const list = missing.map((m) => `${m.need}x ${m.name}`).join(', ') || 'materials';
-      return { ok: !!optional, reason: `need ${list} for ${name}`, missing };
+      /**
+       * Pick the recipe she is CLOSEST to being able to make.
+       *
+       * Taking all[0] blindly is why she kept reporting "need 4x pale_oak_planks"
+       * while holding a stack of birch: every wood type is a separate recipe, and the
+       * first one returned is arbitrary. Scoring by how much is missing makes her
+       * choose the variant matching the wood she actually has.
+       */
+      const scored = all
+        .map((r) => {
+          const missing = missingFor(bot, r);
+          return { recipe: r, missing, cost: missing.reduce((s, m) => s + m.need, 0) };
+        })
+        .sort((a, b) => a.cost - b.cost);
+      const best = scored[0];
+
+      if (depth < 2 && best.missing.length) {
+        for (const m of best.missing) {
+          task.check();
+          const sub = await craft(bot, task, { item: m.name, count: m.need, optional: true, depth: depth + 1 });
+          if (!sub.ok) log.debug(`sub-craft ${m.name} failed: ${sub.reason || ''}`);
+        }
+        await wait(300);
+        recipes = bot.recipesFor(id, null, 1, table || undefined);
+      }
+
+      if (!recipes.length) {
+        const list = best.missing.map((m) => `${m.need}x ${m.name}`).join(', ') || 'materials';
+        return { ok: !!optional, reason: `need ${list} for ${name}`, missing: best.missing };
+      }
     }
   }
 
-  const recipe = recipes[0];
-  const per = recipe.result?.count || 1;
-  const times = Math.max(1, Math.ceil((want - count(bot, name)) / per));
-
-  try {
-    if (table && bot.entity.position.distanceTo(table.position) > 3.2) {
-      await goTo(bot, task, table.position.x, table.position.y, table.position.z, { range: 2 });
-    }
-    await bot.craft(recipe, times, table || undefined);
-    mem.bump('itemsCrafted', times * per);
-    log.act(`crafted ${times * per}x ${name}`);
-    return { ok: true, detail: `crafted ${times * per}x ${name}` };
-  } catch (err) {
-    if (task.aborted) throw new AbortError();
-    return { ok: !!optional, reason: `craft ${name} failed: ${err.message}` };
+  if (table && bot.entity.position.distanceTo(table.position) > 3.2) {
+    await goTo(bot, task, table.position.x, table.position.y, table.position.z, { range: 2 });
   }
+
+  // Walk the candidate list rather than betting everything on the first entry.
+  let lastErr = null;
+  for (const recipe of recipes) {
+    task.check();
+    const per = recipe.result?.count || 1;
+    const times = Math.max(1, Math.ceil((want - count(bot, name)) / per));
+    try {
+      await bot.craft(recipe, times, table || undefined);
+      mem.bump('itemsCrafted', times * per);
+      log.act(`crafted ${times * per}x ${name}`);
+      return { ok: true, detail: `crafted ${times * per}x ${name}` };
+    } catch (err) {
+      if (task.aborted) throw new AbortError();
+      lastErr = err;
+    }
+  }
+  return { ok: !!optional, reason: `craft ${name} failed: ${lastErr?.message || 'no usable recipe'}` };
 }
 
 /** A furnace within reach — found, placed, or crafted then placed. */

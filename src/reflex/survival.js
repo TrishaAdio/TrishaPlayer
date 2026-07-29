@@ -392,6 +392,42 @@ export class Reflex extends EventEmitter {
     }
   }
 
+  /**
+   * Eat deliberately, right now, taking whatever is available including raw meat.
+   *
+   * The passive eatCheck is fussy on purpose: it only touches raw or rotten food when
+   * actually starving, which is correct for routine grazing. But when the goal is to
+   * heal, refusing to eat raw beef at 10 food means regeneration never starts — and
+   * a soak run logged 26 heals failing with "food too low" while she was carrying
+   * meat the whole time.
+   */
+  async forceEat() {
+    const bot = this.bot;
+    if (this.eating) return false;
+    if (bot.food >= 19) return false;
+    const food = this.bestFood(true);
+    if (!food) return false;
+
+    this.eating = true;
+    const previous = bot.heldItem;
+    try {
+      await bot.equip(food, 'hand');
+      await bot.consume();
+      this.lastEat = Date.now();
+      log.reflex(`force-ate ${food.name} to start regenerating (food ${bot.food}/20)`);
+      if (previous && previous.name !== food.name) {
+        const still = bot.inventory.items().find((i) => i.name === previous.name);
+        if (still) await bot.equip(still, 'hand').catch(() => {});
+      }
+      return true;
+    } catch (err) {
+      log.debug(`force eat failed: ${err.message}`);
+      return false;
+    } finally {
+      this.eating = false;
+    }
+  }
+
   dropShield() {
     if (this.blocking) {
       this.blocking = false;

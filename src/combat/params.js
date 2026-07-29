@@ -51,6 +51,19 @@ export const DEFAULT_PARAMS = {
   creeperShootRange: 9,
   creeperHitRunBackoffMs: 750,
   creeperMinHp: 14,
+
+  /**
+   * ── handicaps, for building sparring partners ───────────
+   *
+   * Zero for Trisha. Non-zero values make an opponent behave like a person:
+   * humans have 150-250ms of reaction latency, miss some clicks, and cannot hold
+   * perfect spacing. Without these, self-play only ever measures her against a
+   * mirror of herself, which says nothing about how she does against a player.
+   */
+  reactionDelayMs: 0,   // added latency before reacting to the opponent
+  aimErrorDeg: 0,       // random angular error added to every look
+  missChance: 0,        // fraction of swings fumbled outright
+  useAxe: true,         // whether this fighter knows the shield-break trick
 };
 
 /** Which knobs the tuner is allowed to move, and the range it may explore. */

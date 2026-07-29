@@ -113,9 +113,19 @@ export class Brain {
         return;
       }
       if (fast.stopOnly) {
+        /**
+         * "Stop" has to mean stop.
+         *
+         * Cancelling the action was not enough: the ladder immediately queued the next
+         * job and she walked off again, so a live test measured her moving 5.1m in the
+         * four seconds after being told to stop. She now holds position until he says
+         * something else, or two minutes pass.
+         */
         this.executor.cancel('owner said stop');
         this.plan = [];
         this.order = null;
+        this._spec = null;
+        this.holdUntil = Date.now() + 120000;
         this.say(fast.reply);
         return;
       }
@@ -138,8 +148,10 @@ export class Brain {
 
   acceptOrder(text, actions, interrupt = true) {
     if (!actions?.length) return;
-    // Anything he says invalidates whatever she was planning to do next.
+    // Anything he says invalidates whatever she was planning to do next, and
+    // releases a hold from a previous "stop".
     this._spec = null;
+    this.holdUntil = 0;
     this.order = { text, at: Date.now(), actions: actions.map((a) => a.name) };
     if (interrupt) {
       this.executor.cancel('owner order');
@@ -199,6 +211,32 @@ export class Brain {
       if (Date.now() - (this._lastDefence || 0) < 3000) return;
       if (this.bot.health <= config.ladder.homeHp) return; // reflex/retreat owns this
       if (this.executor.currentName === 'attack' || this.executor.currentName === 'duel' || this.executor.currentName === 'defend') return;
+
+      /**
+       * Creepers must be able to interrupt her work.
+       *
+       * The dodge reflex is tick-based so it always fired, but it only backs her off
+       * for a moment — and because a creeper she cannot shoot is excluded from
+       * nearestThreat, nothing ever interrupted the job she was doing. She would keep
+       * chopping in the same spot, dodge, drift back, dodge again, and eventually one
+       * caught her. A soak run ended exactly that way. Now she leaves the area.
+       */
+      const creeper = nearbyEntities(this.bot, 6).find((e) => e.name === 'creeper');
+      if (creeper) {
+        const canShoot =
+          this.bot.inventory.items().some((i) => i.name === 'bow' || i.name === 'crossbow') &&
+          this.bot.inventory.items().some((i) => /arrow/.test(i.name));
+        if (!canShoot && !this.recentlyTriedCreeper(creeper.entity.id)) {
+          this._lastDefence = Date.now();
+          this._creeperTried.set(creeper.entity.id, Date.now());
+          const remaining = [...this.plan];
+          log.brain(`creeper at ${creeper.distance}m and no bow — leaving the area`);
+          this.plan = [{ name: 'flee', args: { from: 'creeper', distance: 16 } }];
+          if (this.order) this.plan.push(...remaining);
+          this.executor.cancel('creeper too close');
+          return;
+        }
+      }
 
       const threat = this.nearestThreat();
       if (!threat) return;
@@ -329,6 +367,16 @@ export class Brain {
       return;
     }
 
+    // Told to stand down. Survival still applies — everything else waits.
+    if (this.holdUntil && Date.now() < this.holdUntil) {
+      if (!this._heldLogged) {
+        log.brain('holding position until told otherwise');
+        this._heldLogged = true;
+      }
+      return;
+    }
+    this._heldLogged = false;
+
     // 2. Queued plan (from his orders, or from a ladder rung).
     if (this.plan.length) {
       const next = this.plan.shift();
@@ -343,8 +391,10 @@ export class Brain {
     }
 
     // 3. Housekeeping that matters but can wait for his orders to finish.
+    //    Gated by the same anti-thrash rule as criticals: a soft emergency that
+    //    keeps failing must not be allowed to crowd out the ladder.
     const soft = this.softEmergency();
-    if (soft) {
+    if (soft && this.allowCritical(soft)) {
       log.brain(`housekeeping: ${soft.name}`);
       await this.executor.run(soft);
       return;
@@ -484,7 +534,20 @@ export class Brain {
     const hp = bot.health;
     const hostiles = this.targeting.pick({ maxDistance: 12 });
 
-    if (hp < 12 && !hostiles) return { name: 'heal', args: {} };
+    /**
+     * Hurt and out of combat. The answer depends on whether healing is even possible:
+     * regeneration needs a nearly full food bar, so with an empty pack "heal" fails
+     * instantly and re-fires forever. A 420-second soak run logged 547 failed heals
+     * before this distinction existed. If she cannot heal, the correct move is to go
+     * and get food, which fixes both problems at once.
+     */
+    if (hp < 12 && !hostiles) {
+      const canHeal =
+        !!this.reflex.bestFood(true) ||
+        bot.inventory.items().some((i) => /golden_apple|^potion$/.test(i.name));
+      if (canHeal) return { name: 'heal', args: {} };
+      if (bot.food < 18) return { name: 'getFood', args: { urgent: true, count: 6 } };
+    }
 
     // SELF DEFENCE. Anything hostile that gets close gets dealt with, without
     // waiting for the model to have an opinion about it. Without this she stands

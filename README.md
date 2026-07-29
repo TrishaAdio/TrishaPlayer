@@ -21,13 +21,14 @@
 
 <br>
 
-![Actions](https://img.shields.io/badge/actions-56-af005f)
+![Actions](https://img.shields.io/badge/actions-59-af005f)
 ![Clutches](https://img.shields.io/badge/clutches-21-d7005f)
-![Ladder](https://img.shields.io/badge/ladder%20rungs-23-5f5f87)
+![Ladder](https://img.shields.io/badge/ladder%20rungs-24-5f5f87)
 ![Checks](https://img.shields.io/badge/offline%20checks-51%2F51-87afaf)
 ![Owner tests](https://img.shields.io/badge/live%20owner%20tests-5%2F5-114)
-![Tuned](https://img.shields.io/badge/tuned%20vs%20defaults-10--0-d7005f)
-![Deaths](https://img.shields.io/badge/live%20test%20deaths-0-d7af5f)
+![Benchmark](https://img.shields.io/badge/vs%20modelled%20players-25--0-d7005f)
+![Tuned](https://img.shields.io/badge/tuned%20vs%20defaults-10--0-af005f)
+![Ballistics](https://img.shields.io/badge/bow%20accuracy-0.01%20blocks-5f5f87)
 ![LLM](https://img.shields.io/badge/LLM-tiered%20%2B%20fallbacks-808080)
 
 </div>
@@ -101,15 +102,17 @@ model only decides **whether** to fight and **who**.
 
 | Metric | Value |
 |:---|:---:|
-| Lines of code (`src/`) | **7,182** |
-| Source modules | **29** |
-| Test & tooling scripts | **5** |
-| Registered actions | **56** |
+| Lines of code (`src/`) | **8,078** |
+| Source modules | **30** |
+| Test & tooling scripts | **8** |
+| Registered actions | **59** |
 | Clutch techniques | **21** |
-| Survival ladder rungs | **23** |
+| Survival ladder rungs | **24** |
 | Offline checks passing | **51 / 51** |
 | Live owner-order tests | **5 / 5** |
 | Tuned profile vs defaults | **10 – 0** |
+| Vs modelled players | **25 – 0** |
+| Bow accuracy at 60m | **0.01 blocks** |
 | Live test deaths | **0** |
 | Local models required | **0** |
 | Minimum spec | **1 vCPU · 1 GB RAM** |
@@ -312,55 +315,124 @@ REACH        inside 3.0 blocks only.
 SHIELD       raised during cooldown,
              dropped to swing.
 
-BOW          aims where you WILL be, from
-             your velocity vector and arrow
-             flight time.
+BOW          full ballistic solution — see
+             the ballistics section. accurate
+             to 0.01 blocks at 60m.
 ```
 
 </td>
 <td width="50%" valign="top">
 
-**Creeper doctrine** — the one mob she never brawls
+**Axe doctrine — the shield answer**
 
 ```
-   has bow?
-      │
-     yes ──▶ back off 9 blocks, shoot it dead
-      │
-      no
-      ▼
-   HP ≥ 14?
-      │
-      no ──▶ leave. a creeper is never
-      │      worth dying for.
-     yes
-      ▼
-   strict hit-and-run:
-      close ▸ ONE hit ▸ sprint out of
-      blast radius ▸ wait out the fuse
-      ▸ repeat
+A shield negates a sword hit entirely, so a
+sword duel against a blocker is unwinnable no
+matter how good the timing is.
+
+An axe hit disables a shield for 5 seconds.
+
+  2 swings, no damage registered?
+        ▼
+  they are blocking ──▶ switch to AXE
+        ▼
+  axe lands ──▶ shield disabled 5s
+        ▼
+  switch back to SWORD for the DPS window
 ```
 
-Because melee range starts the fuse, and the
-fuse finishes **before the attack cooldown
-refills**. Trading hits with a creeper is
-mathematically a loss.
+Detection is behavioural, not metadata-based:
+the "hand active" bit moves between protocol
+versions, but *"my hits are landing on
+nothing"* is true in every version.
 
 <br>
 
-**Opponent profiles**
+**Creeper doctrine** — never brawled
 
-Per-username habits saved across sessions —
-jump-swing tells, strafe bias, panic-block,
-retreat pattern.
+```
+  has bow?  ─yes─▶ back off 9m, shoot it dead
+     │no
+  HP ≥ 14?  ─no──▶ leave. never worth dying for
+     │yes
+  hit-and-run: close ▸ ONE hit ▸ sprint out
+  of blast radius ▸ wait the fuse ▸ repeat
+```
+
+Melee range starts the fuse, and the fuse ends
+**before the attack cooldown refills**.
+
+<br>
+
+**Opponent modelling that adapts**
+
+Per-username profiles that change how she
+fights, not just statistics she collects:
+
+```
+  shield camper ──▶ axe opener from swing one
+  runner ────────▶ pursuit to 32 blocks
+  jumper ────────▶ wider spacing, their crit
+                   arc lands short
+  beat her before ▶ earlier resets, more
+                   caution
+```
 
 A human reads your pattern after twenty
-fights. She reads it after two and never
+fights. She reads it after two, and never
 forgets.
 
 </td>
 </tr>
 </table>
+
+---
+
+## 🏹 &nbsp; Bow ballistics
+
+<details open>
+<summary><b>Solved trajectories, not estimates</b></summary>
+
+<br>
+
+An arrow follows a drag-damped parabola:
+
+```
+  each tick:   pos += vel
+               vel *= 0.99      (air drag)
+               vel.y -= 0.05    (gravity)
+  full draw:   |vel| = 3.0 blocks/tick
+```
+
+The old code added a linear "drop" term proportional to distance and led the target
+with a flat multiplier. That undershoots badly past 20 blocks and overshoots up close.
+
+`src/combat/ranged.js` instead **simulates the arrow tick-for-tick** and searches for
+the launch pitch that actually lands on the target — coarse sweep to bracket, then a
+fine refine. Target movement is handled by iteration: solve, read the flight time,
+advance the target by that much, solve again.
+
+```
+  dist  pitch      landing error   flight
+     4   0.24°      0.0001 blocks   0.07s
+    12   1.48°      0.0005 blocks   0.20s
+    20   2.86°      0.0033 blocks   0.34s
+    30   4.66°      0.0051 blocks   0.53s
+    50   8.60°      0.0000 blocks   0.92s
+    60  10.82°      0.0024 blocks   1.13s
+
+  worst vertical error across 50 cases: 0.0093 blocks
+```
+
+For scale, a player hitbox is 0.6 × 1.8 blocks. The solver is two orders of magnitude
+tighter than the target it is aiming at.
+
+Two details that matter as much as the maths: she **aims at the moment of release**,
+not before the draw (the target keeps moving during that full second of charge), and
+she **raycasts for a clear lane** first, sidestepping instead of feeding arrows into a
+wall.
+
+</details>
 
 ---
 
@@ -400,7 +472,34 @@ The confirmed profile beats the hand-reasoned defaults **10–0 with a +7 HP mar
   result: 10-0 (0 draws), hp margin +7 — CONFIRMED
 ```
 
-**Two results contradict the design I argued for earlier in this README:**
+### Benchmark — against opponents that are not her
+
+Self-play only proves she beats her own previous profile. So `scripts/bench.js` runs
+her against modelled players, each with human reaction latency (160–220ms), aim error
+and fumbled clicks:
+
+```
+  opponent                     record    win%   hp margin
+  ------------------------------------------------------------------
+  rusher                       5-0       100%   +13.4
+  shieldcamp                   5-0       100%    +9.6
+  bowkite                      5-0       100%   +12.2
+  strafer                      5-0       100%   +12.2
+  human                        5-0       100%   +12.8
+  mirror  (control)            3-2        60%    +0.2
+
+  overall vs modelled opponents: 25-0
+  control at 60% — the harness is not biased
+```
+
+The `mirror` row is the control: a perfect copy of her with no handicaps, which should
+land near 50%. It does, so the other rows mean something.
+
+**Caveat worth stating plainly:** these are *my models* of how people fight. A real
+human is less predictable than any of them. 25-0 against modelled opponents is strong
+evidence, not proof.
+
+**Two tuning results contradict the design I argued for earlier in this README:**
 
 - **Crit discipline loses to raw swing rate.** The jump-crit setup costs more tempo
   at tick granularity than the +50% damage returns. She now swings on cooldown
@@ -454,17 +553,19 @@ Zero LLM calls. Pure state machine.
 | ⑨ | shelter (+ bed) | ㉑ | **enchant sword, armour, pickaxe** |
 | ⑩ | branch mine **iron** @ Y=16 | ㉒ | golden apple in the pocket |
 | ⑪ | full iron kit + shield | ㉓ | nether run for ancient debris |
-| ⑫ | water bucket (lava + MLG) | | |
+| ⑫ | water bucket (lava + MLG) | ㉔ | netherite upgrade (if she has a template) |
 
 Rungs 17–21 are where the real power is. Protection IV across four pieces roughly
 halves incoming damage and Sharpness V adds about three hearts a swing — more than
 any amount of combat tuning can buy.
 
-> **On netherite:** she can reach netherite *ingots* unattended, but not netherite
-> *gear*. Since 1.20 the upgrade also needs a `netherite_upgrade_smithing_template`,
-> and those only generate in bastion remnant loot. Raiding a bastion is a different
-> class of problem, so that rung is optional and can never block her. Enchanted
-> diamond is her realistic ceiling, and it is very close in practice.
+> **On netherite:** the smithing path is implemented and **verified end to end** —
+> `npm run netherite-test` grants the three inputs through the server console and
+> drives the real upgrade action, confirming a `netherite_sword` lands in her
+> inventory. She reaches ingots unattended. The remaining constraint is the
+> `netherite_upgrade_smithing_template`, which only generates in bastion remnant loot;
+> `raidBastion` makes a best-effort attempt at it, but piglin brutes make that
+> genuinely dangerous, so the rung is optional and can never block her.
 
 </div>
 
@@ -631,11 +732,14 @@ Model probe against the live relay:
    │                     nether, misc
    └── world/            state snapshot, memory, block & entity scanning
   scripts/
-   ├── probe-llm.js      model selection evidence
-   ├── dry-run.js        51 offline checks
-   ├── fake-owner.js     connects as the owner, tests obedience live
-   ├── spar.js           two bots duel in a fixed arena
-   └── tune.js           parameter sweep + confirmation run
+   ├── probe-llm.js       model selection evidence
+   ├── dry-run.js         51 offline checks
+   ├── fake-owner.js      connects as the owner, tests obedience live
+   ├── spar.js            two bots duel in a fixed arena
+   ├── tune.js            parameter sweep + confirmation run
+   ├── archetypes.js      modelled opponents with human handicaps
+   ├── bench.js           her vs every archetype
+   └── netherite-test.js  verifies the smithing upgrade end to end
 ```
 
 She remembers across restarts in `memory/trisha.json` — base, bed, chests, ore
@@ -655,11 +759,15 @@ locations, deaths, lessons, opponent profiles. Delete it to give her amnesia.
   [x] self-play tuning ........ measured profile, confirmed 10-0 vs defaults
   [x] endgame ladder .......... obsidian, books, enchanting, XP 30, nether
   [x] speculative planning .... next action pre-planned during the current one
-  [ ] opponent modelling ...... deeper per-player prediction (profiles are
-                                recorded now; prediction is not wired in yet)
+  [x] bow ballistics .......... solved trajectories, 0.01 block accuracy
+  [x] axe doctrine ............ shield-break detection and weapon switching
+  [x] opponent modelling ...... profiles now drive per-fight strategy
+  [x] netherite gear .......... smithing path verified end to end
+  [x] benchmark suite ......... 5 modelled opponents + a bias control
   [ ] blueprint building ...... .nbt / .schem megastructures
   [ ] self-written skills ..... she authors new routines at runtime (sandboxed)
-  [ ] multi-pass tuning ....... overnight sweeps with larger samples per candidate
+  [ ] multi-pass tuning ....... overnight sweeps, larger samples per candidate
+  [ ] fight an actual human ... the one test that cannot be simulated
 ```
 
 ---

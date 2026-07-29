@@ -171,6 +171,224 @@ export async function makeNetheriteIngot(bot, task, { count: want = 1 } = {}) {
   return { ok: have > 0, detail: `netherite ingots: ${have}`, got: have, reason: made.reason };
 }
 
+/** Smithing table: 2 iron ingots and 4 planks. */
+export async function ensureSmithingTable(bot, task) {
+  const id = bot.mcData.blocksByName.smithing_table?.id;
+  let block = id != null ? bot.findBlock({ matching: id, maxDistance: 24 }) : null;
+  if (block) {
+    if (bot.entity.position.distanceTo(block.position) > 3.2) {
+      await goTo(bot, task, block.position.x, block.position.y, block.position.z, { range: 2 }).catch(() => {});
+    }
+    return block;
+  }
+  if (!item(bot, 'smithing_table')) {
+    const made = await craft(bot, task, { item: 'smithing_table', count: 1 });
+    if (!made.ok) return null;
+  }
+  const spot = bot.entity.position.floored().offset(1, 0, 0);
+  if (await placeAt(bot, task, spot, 'smithing_table')) {
+    mem.addWaypoint('smithing', spot);
+    return bot.blockAt(spot);
+  }
+  return null;
+}
+
+/**
+ * NETHERITE UPGRADE.
+ *
+ * Since 1.20 this needs three inputs: the upgrade template, the diamond item, and a
+ * netherite ingot. The template is the hard part — it only generates in bastion
+ * remnant loot — so this is written to work the moment one is obtained by any route
+ * (bastion run, a trade, or handed over by RAREAURA) rather than assuming she can
+ * always make one.
+ *
+ * Window layout for a smithing table: 0 = template, 1 = base item, 2 = addition,
+ * 3 = result.
+ */
+export async function upgradeNetherite(bot, task, { item: itemName } = {}) {
+  const template = item(bot, 'netherite_upgrade_smithing_template');
+  if (!template) {
+    return { ok: false, reason: 'no netherite_upgrade_smithing_template — bastion loot only' };
+  }
+  const ingot = item(bot, 'netherite_ingot');
+  if (!ingot) return { ok: false, reason: 'no netherite ingot' };
+
+  const wanted = itemName
+    ? [String(itemName)]
+    : ['diamond_sword', 'diamond_chestplate', 'diamond_helmet', 'diamond_leggings', 'diamond_boots', 'diamond_pickaxe', 'diamond_axe'];
+  const base = wanted.map((n) => item(bot, n)).find(Boolean);
+  if (!base) return { ok: false, reason: `no diamond item to upgrade (${wanted[0]})` };
+
+  const table = await ensureSmithingTable(bot, task);
+  if (!table) return { ok: false, reason: 'no smithing table' };
+
+  let win; // reassigned when an extraction retry has to reopen the table
+  try {
+    win = await bot.openBlock(table);
+  } catch (err) {
+    return { ok: false, reason: `cannot open smithing table: ${err.message}` };
+  }
+
+  /**
+   * Slot geometry, derived rather than assumed. prismarine-windows does not always
+   * expose inventoryStart for a block window, and hardcoding 4 would break the
+   * moment the layout changed — so fall back to counting from the end: the player
+   * inventory is always the last 36 slots of any window.
+   */
+  const RESULT_SLOT = 3;
+  /**
+   * Do NOT trust window.inventoryStart here. For a smithing table prismarine-windows
+   * reports 3, but slot 3 is the RESULT slot — so the "first empty inventory slot"
+   * came back as 3 and every extraction attempt moved the result onto itself and
+   * silently did nothing. The player inventory is always the final 36 slots, and it
+   * can never start before slot 4 on this window.
+   */
+  const invStart = Math.max(RESULT_SLOT + 1, win.slots.length - 36);
+  log.debug(`smithing window: type=${win.type} slots=${win.slots.length} reported=${win.inventoryStart} using=${invStart}`);
+
+  const findIn = (name) => {
+    for (let i = invStart; i < win.slots.length; i++) {
+      if (win.slots[i]?.name === name) return i;
+    }
+    // Last resort: scan the whole window.
+    for (let i = 0; i < win.slots.length; i++) {
+      if (win.slots[i]?.name === name) return i;
+    }
+    return -1;
+  };
+
+  const firstEmpty = () => {
+    for (let i = invStart; i < win.slots.length; i++) if (!win.slots[i]) return i;
+    return -1;
+  };
+
+  try {
+    const moves = [
+      ['netherite_upgrade_smithing_template', 0],
+      [base.name, 1],
+      ['netherite_ingot', 2],
+    ];
+    for (const [name, dest] of moves) {
+      const from = findIn(name);
+      if (from === -1) throw new Error(`${name} vanished from the inventory`);
+      await bot.moveSlotItem(from, dest);
+      await wait(220);
+    }
+
+    await wait(600);
+    const result = win.slots[3];
+    if (!result) throw new Error('smithing produced no result — wrong combination');
+    const upgraded = result.name;
+
+    /**
+     * Getting the result OUT, verified correctly.
+     *
+     * The earlier version checked bot.inventory while the smithing window was still
+     * open — and bot.inventory mirrors the player window, not the block window, so a
+     * successful move looked like a failure and the retries piled on top of each
+     * other. The only reliable check is: close the window, then look.
+     */
+    /**
+     * NEVER shift-click a smithing result.
+     *
+     * Verified against server-side `data get entity`: a shift-click does complete the
+     * upgrade and the item really does reach the player's inventory, but mineflayer
+     * loses track of it completely — `bot.inventory` reports empty, so she owns a
+     * netherite sword she can never equip or see. An explicit move into a chosen slot
+     * keeps the client model in sync and was confirmed correct on both sides.
+     *
+     * win.slots is raw and authoritative. bot.inventory is the derived view that goes
+     * wrong while this window is open, so success is judged on the raw slot.
+     */
+    const rawTarget = firstEmpty();
+    if (rawTarget === -1) {
+      return { ok: false, reason: 'inventory full — no room for the upgraded item' };
+    }
+
+    await bot.moveSlotItem(RESULT_SLOT, rawTarget).catch((e) => log.debug(`move failed: ${e.message}`));
+    await wait(700);
+
+    const movedOk = win.slots[rawTarget]?.name === upgraded;
+    if (!movedOk) {
+      // One retry with a manual pickup-and-place, still avoiding shift-click.
+      await bot.clickWindow(RESULT_SLOT, 0, 0).catch(() => {});
+      await wait(300);
+      await bot.clickWindow(rawTarget, 0, 0).catch(() => {});
+      await wait(600);
+    }
+
+    const raw = win.slots[rawTarget]?.name;
+    try {
+      win.close();
+    } catch {}
+    await wait(900);
+
+    const landed = bot.inventory.items().some((i) => i.name === upgraded);
+    if (!landed && raw !== upgraded) {
+      return { ok: false, reason: `smithed ${upgraded} but could not remove it from the table` };
+    }
+
+    log.act(`upgraded ${base.name} -> ${upgraded}`);
+    mem.note(`netherite: ${upgraded}`);
+    return { ok: true, detail: `upgraded to ${upgraded}` };
+  } catch (err) {
+    if (task.aborted) throw new AbortError();
+    return { ok: false, reason: `smithing failed: ${err.message}` };
+  } finally {
+    try {
+      win.close();
+    } catch {}
+  }
+}
+
+/**
+ * Bastion remnants are the only source of the upgrade template.
+ * Best effort by design: she looks for the distinctive blackstone brickwork while in
+ * the nether, and loots any chest she can reach. Piglin brutes make this genuinely
+ * dangerous, so it never becomes a required step.
+ */
+export async function raidBastion(bot, task, { searchRadius = 96 } = {}) {
+  if (!inNether(bot)) return { ok: false, reason: 'not in the nether' };
+
+  const marker = ['polished_blackstone_bricks', 'polished_blackstone_brick_stairs', 'chiseled_polished_blackstone', 'gilded_blackstone']
+    .map((n) => bot.mcData.blocksByName[n]?.id)
+    .filter((x) => x != null);
+
+  const found = bot.findBlocks({ matching: marker, maxDistance: searchRadius, count: 4 });
+  if (!found.length) return { ok: false, reason: 'no bastion structures in range' };
+
+  log.act('bastion brickwork spotted — looking for chests');
+  await goTo(bot, task, found[0].x, found[0].y, found[0].z, { range: 6, timeoutMs: 90000 }).catch(() => {});
+
+  const chestIds = ['chest', 'trapped_chest'].map((n) => bot.mcData.blocksByName[n]?.id).filter((x) => x != null);
+  const chests = bot.findBlocks({ matching: chestIds, maxDistance: 48, count: 6 });
+  if (!chests.length) return { ok: false, reason: 'found the structure but no reachable chests' };
+
+  let looted = 0;
+  let gotTemplate = false;
+  for (const pos of chests) {
+    task.check();
+    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 40000 });
+    if (!res.ok) continue;
+    const block = bot.blockAt(pos);
+    if (!block) continue;
+    try {
+      const chest = await bot.openContainer(block);
+      for (const it of chest.containerItems()) {
+        await chest.withdraw(it.type, null, it.count).catch(() => {});
+        if (it.name === 'netherite_upgrade_smithing_template') gotTemplate = true;
+      }
+      chest.close();
+      looted++;
+    } catch {}
+  }
+  return {
+    ok: looted > 0,
+    detail: `looted ${looted} bastion chest(s)${gotTemplate ? ' — GOT THE TEMPLATE' : ''}`,
+    got: gotTemplate ? 1 : 0,
+  };
+}
+
 /**
  * The full trip, as one action: portal -> nether -> debris -> back home.
  * Every leg fails soft, because a nether run going wrong should not end the session.

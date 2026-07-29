@@ -105,7 +105,15 @@ export const LADDER = [
   {
     id: 'wood',
     label: 'gather logs',
-    done: (bot) => logs(bot) + Math.floor(planks(bot) / 4) >= 6,
+    /**
+     * Satisfied once she owns a pickaxe, not only while she is holding six logs.
+     *
+     * Requiring the logs unconditionally caused an oscillation: chop 8 logs, spend
+     * them crafting tools, drop below six, and the ladder sends her back to chop
+     * again — forever. A soak run never got past this pair of rungs. The logs are a
+     * means to the first tools, so once the tools exist the rung is done.
+     */
+    done: (bot) => pickTier(bot) >= 1 || logs(bot) + Math.floor(planks(bot) / 4) >= 6,
     actions: () => [{ name: 'chopWood', args: { count: 8 } }],
   },
   {
@@ -302,6 +310,24 @@ export const LADDER = [
       { name: 'netheriteIngot', args: { count: 1 } },
       { name: 'home', args: {} },
       { name: 'deposit', args: { keep: 'gear,food,torch,blocks' } },
+    ],
+  },
+  {
+    id: 'netherite_gear',
+    label: 'upgrade gear to netherite',
+    /**
+     * Only reachable with an upgrade template, which is bastion loot. If she has one
+     * she will use it — the smithing path is verified working end to end — and if she
+     * does not, this rung is already satisfied so it never becomes a wall.
+     */
+    done: (bot) =>
+      !has(bot, 'netherite_upgrade_smithing_template') ||
+      !has(bot, 'netherite_ingot') ||
+      countAny(bot, 'netherite_sword', 'netherite_chestplate', 'netherite_pickaxe') > 0,
+    actions: () => [
+      { name: 'upgradeNetherite', args: { item: 'diamond_sword' } },
+      { name: 'upgradeNetherite', args: { item: 'diamond_chestplate' } },
+      { name: 'equipBest', args: {} },
     ],
   },
 ];

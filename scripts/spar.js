@@ -26,6 +26,7 @@ import { installMovement } from '../src/skills/move.js';
 import { Targeting } from '../src/combat/targeting.js';
 import { CombatEngine } from '../src/combat/engine.js';
 import { DEFAULT_PARAMS } from '../src/combat/params.js';
+import { ARCHETYPES } from './archetypes.js';
 
 // ── args ────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -45,6 +46,14 @@ const QUIET = argv.includes('--quiet');
 const A_NAME = arg('aname', 'Challenger');
 const B_NAME = arg('bname', 'Baseline');
 
+// Declared up here because the parameter blocks below depend on it.
+const ARCHETYPE = arg('archetype', '');
+const ARCH = ARCHETYPE && ARCHETYPES[ARCHETYPE] ? ARCHETYPES[ARCHETYPE] : null;
+if (ARCHETYPE && !ARCH) {
+  console.error(`unknown archetype "${ARCHETYPE}". known: ${Object.keys(ARCHETYPES).join(', ')}`);
+  process.exit(1);
+}
+
 /**
  * Fight to the death, applied equally to both sides.
  *
@@ -61,7 +70,10 @@ const TO_DEATH = !argv.includes('--no-death-match');
 const DEATH_PATCH = TO_DEATH ? { breakOffHp: 0 } : {};
 
 const A_PARAMS = { ...JSON.parse(arg('a', '{}')), ...DEATH_PATCH };
-const B_PARAMS = { ...JSON.parse(arg('b', '{}')), ...DEATH_PATCH };
+// An archetype, if named, defines the opponent entirely.
+const B_PARAMS = ARCH
+  ? { ...ARCH.params, ...DEATH_PATCH }
+  : { ...JSON.parse(arg('b', '{}')), ...DEATH_PATCH };
 
 // ── arena ───────────────────────────────────────────────────────────
 // A fixed, force-loaded, flat stone platform. Identical every round, so terrain
@@ -81,6 +93,10 @@ const KIT = [
   'iron_sword 1', 'shield 1', 'iron_helmet 1', 'iron_chestplate 1',
   'iron_leggings 1', 'iron_boots 1',
 ];
+
+// An archetype opponent brings its own loadout, so a bow kiter actually has a bow.
+const A_KIT = arg('akit', '') ? arg('akit', '').split('|') : KIT;
+const B_KIT = ARCH ? ARCH.kit : (arg('bkit', '') ? arg('bkit', '').split('|') : KIT);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const say = (...a) => {
@@ -112,12 +128,12 @@ function buildArena() {
   cmd(`fill ${ARENA.x - ARENA.half + 1} ${ARENA.y} ${ARENA.z - ARENA.half + 1} ${ARENA.x + ARENA.half - 1} ${ARENA.y + 3} ${ARENA.z + ARENA.half - 1} air`);
 }
 
-function resetFighter(name, spawn) {
+function resetFighter(name, spawn, kit = KIT) {
   cmd(`gamemode survival ${name}`);
   cmd(`effect clear ${name}`);
   cmd(`clear ${name}`);
   cmd(`tp ${name} ${spawn.x} ${spawn.y} ${spawn.z}`);
-  for (const item of KIT) cmd(`give ${name} ${item}`);
+  for (const item of kit) cmd(`give ${name} ${item}`);
   // instant_health at high amplifier restores to full; saturation keeps the food
   // bar topped up so nobody loses on hunger instead of skill.
   cmd(`effect give ${name} instant_health 1 20 true`);
@@ -196,8 +212,8 @@ class Fighter {
 
 // ── one duel ────────────────────────────────────────────────────────
 async function duel(a, b, round) {
-  resetFighter(a.name, A_SPAWN);
-  resetFighter(b.name, B_SPAWN);
+  resetFighter(a.name, A_SPAWN, A_KIT);
+  resetFighter(b.name, B_SPAWN, B_KIT);
   await sleep(2500);
 
   await equipBest(a.bot).catch(() => {});
@@ -279,10 +295,14 @@ async function duel(a, b, round) {
   }
 
   say(`\nsparring: ${A_NAME} vs ${B_NAME}, ${DUELS} duels`);
-  const aDiff = Object.entries(A_PARAMS).map(([k, v]) => `${k}=${v}`).join(' ') || 'defaults';
-  const bDiff = Object.entries(B_PARAMS).map(([k, v]) => `${k}=${v}`).join(' ') || 'defaults';
-  say(`  ${A_NAME}: ${aDiff}`);
-  say(`  ${B_NAME}: ${bDiff}\n`);
+  if (ARCH) {
+    say(`  opponent archetype: ${ARCH.label}`);
+  } else {
+    const bDiff = Object.entries(B_PARAMS).map(([k, v]) => `${k}=${v}`).join(' ') || 'defaults';
+    say(`  ${B_NAME}: ${bDiff}`);
+  }
+  const aDiff = Object.entries(A_PARAMS).map(([k, v]) => `${k}=${v}`).join(' ') || 'tuned profile';
+  say(`  ${A_NAME}: ${aDiff}\n`);
 
   buildArena();
   await sleep(1500);
