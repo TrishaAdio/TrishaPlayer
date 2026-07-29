@@ -21,11 +21,12 @@
 
 <br>
 
-![Actions](https://img.shields.io/badge/actions-47-af005f)
+![Actions](https://img.shields.io/badge/actions-56-af005f)
 ![Clutches](https://img.shields.io/badge/clutches-21-d7005f)
-![Ladder](https://img.shields.io/badge/ladder%20rungs-16-5f5f87)
-![Checks](https://img.shields.io/badge/offline%20checks-46%2F46-87afaf)
+![Ladder](https://img.shields.io/badge/ladder%20rungs-23-5f5f87)
+![Checks](https://img.shields.io/badge/offline%20checks-51%2F51-87afaf)
 ![Owner tests](https://img.shields.io/badge/live%20owner%20tests-5%2F5-114)
+![Tuned](https://img.shields.io/badge/tuned%20vs%20defaults-10--0-d7005f)
 ![Deaths](https://img.shields.io/badge/live%20test%20deaths-0-d7af5f)
 ![LLM](https://img.shields.io/badge/LLM-tiered%20%2B%20fallbacks-808080)
 
@@ -100,14 +101,15 @@ model only decides **whether** to fight and **who**.
 
 | Metric | Value |
 |:---|:---:|
-| Lines of code (`src/`) | **6,032** |
-| Source modules | **26** |
-| Test & tooling scripts | **3** |
-| Registered actions | **47** |
+| Lines of code (`src/`) | **7,182** |
+| Source modules | **29** |
+| Test & tooling scripts | **5** |
+| Registered actions | **56** |
 | Clutch techniques | **21** |
-| Survival ladder rungs | **16** |
-| Offline checks passing | **46 / 46** |
+| Survival ladder rungs | **23** |
+| Offline checks passing | **51 / 51** |
 | Live owner-order tests | **5 / 5** |
+| Tuned profile vs defaults | **10 – 0** |
 | Live test deaths | **0** |
 | Local models required | **0** |
 | Minimum spec | **1 vCPU · 1 GB RAM** |
@@ -362,6 +364,72 @@ forgets.
 
 ---
 
+## 🧪 &nbsp; Self-play tuning
+
+<details open>
+<summary><b>Her combat numbers are measured, not guessed</b></summary>
+
+<br>
+
+Every spacing and timing value lives in `src/combat/params.js`, and `scripts/tune.js`
+sweeps them with **real duels on a real server**. Two bots, identical iron kits, a
+fixed force-loaded stone arena, fight to the death. The only difference between them
+is the parameter profile.
+
+```bash
+./spar.sh tune --duels 5          # sweep 10 candidates, then confirm
+./spar.sh spar --duels 8 \
+  --a '{"engageRange":3.1}' --b '{}'   # head-to-head, any two profiles
+```
+
+The confirmed profile beats the hand-reasoned defaults **10–0 with a +7 HP margin**.
+
+```
+  tighter spacing         4-1  hp margin +1.8   ADOPTED
+  slower strafe flips     3-2  hp margin +3     ADOPTED
+  snappier crit hop       4-1  hp margin +4.6   ADOPTED
+  crits optional          5-0  hp margin +3.4   ADOPTED
+  no shield cycling       4-1  hp margin +1.8   ADOPTED
+  aggressive approach     5-0  hp margin +1.6   ADOPTED
+  wider spacing           2-2  hp margin -3.6  rejected
+  faster strafe flips     2-2  hp margin -0.6  rejected
+  longer crit hop         1-4  hp margin -1.2  rejected
+  instant sprint reset    2-3  hp margin -0.8  rejected
+
+  confirming against TRUE defaults over 10 duels...
+  result: 10-0 (0 draws), hp margin +7 — CONFIRMED
+```
+
+**Two results contradict the design I argued for earlier in this README:**
+
+- **Crit discipline loses to raw swing rate.** The jump-crit setup costs more tempo
+  at tick granularity than the +50% damage returns. She now swings on cooldown
+  instead of waiting for the descent.
+- **Shield cycling during a sword fight is a net loss.** Raising it costs movement.
+  The reflex shield against arrows and blasts is a separate system and still on.
+
+I would not have found either by reasoning. That is the entire point of measuring.
+
+<br>
+
+**Three measurement bugs the harness itself had**, each of which made it lie:
+
+```
+  ① HP read AFTER respawn, so a dead fighter reported 20 HP and the margin
+     metric came out inverted
+  ② adoption bar of >50% over 3 duels adopted noise — a 3-0 candidate went
+     2-2 on retest. now needs 3+ decided rounds and a 2-win margin.
+  ③ greedy hill-climbing inflated later candidates against an already-degraded
+     baseline. now every profile must beat TRUE defaults in a confirmation run
+     before it is written to disk.
+```
+
+A tuner that adopts noise is worse than no tuner, because it looks like progress.
+
+</details>
+
+---
+
 ## 📜 &nbsp; The survival ladder
 
 <details open>
@@ -375,14 +443,28 @@ Zero LLM calls. Pure state machine.
 
 | | Rung | | Rung |
 |:---:|:---|:---:|:---|
-| ① | mark home | ⑨ | shelter (+ bed) |
-| ② | don't starve | ⑩ | branch mine **iron** @ Y=16 |
-| ③ | gather logs | ⑪ | full iron kit + shield |
-| ④ | wooden pick + axe | ⑫ | water bucket (lava + MLG insurance) |
-| ⑤ | cobblestone | ⑬ | branch mine **diamonds** @ Y=-54 |
-| ⑥ | stone kit + furnace | ⑭ | **come home alive** + store loot |
-| ⑦ | hunt & cook 8 meals | ⑮ | diamond pick + sword |
-| ⑧ | coal → 32 torches | ⑯ | full diamond armour |
+| ① | mark home | ⑬ | branch mine **diamonds** @ Y=-54 |
+| ② | don't starve | ⑭ | **come home alive** + store loot |
+| ③ | gather logs | ⑮ | diamond pick + sword |
+| ④ | wooden pick + axe | ⑯ | full diamond armour |
+| ⑤ | cobblestone | ⑰ | obsidian (mined, or cast from lava) |
+| ⑥ | stone kit + furnace | ⑱ | sugar cane + leather → 15 books |
+| ⑦ | hunt & cook 8 meals | ⑲ | enchanting table + bookshelf ring |
+| ⑧ | coal → 32 torches | ⑳ | XP to level 30 |
+| ⑨ | shelter (+ bed) | ㉑ | **enchant sword, armour, pickaxe** |
+| ⑩ | branch mine **iron** @ Y=16 | ㉒ | golden apple in the pocket |
+| ⑪ | full iron kit + shield | ㉓ | nether run for ancient debris |
+| ⑫ | water bucket (lava + MLG) | | |
+
+Rungs 17–21 are where the real power is. Protection IV across four pieces roughly
+halves incoming damage and Sharpness V adds about three hearts a swing — more than
+any amount of combat tuning can buy.
+
+> **On netherite:** she can reach netherite *ingots* unattended, but not netherite
+> *gear*. Since 1.20 the upgrade also needs a `netherite_upgrade_smithing_template`,
+> and those only generate in bastion remnant loot. Raiding a bastion is a different
+> class of problem, so that rung is optional and can never block her. Enchanted
+> diamond is her realistic ceiling, and it is very close in practice.
 
 </div>
 
@@ -526,7 +608,8 @@ Model probe against the live relay:
 - **Everything is cancellable** — one action at a time, and `trisha stop` lands mid-swing.
 - **Resumable** — predicate-based ladder plus persistent memory means death and restarts cost her nothing.
 - **Fail-soft** — an invalid action from the model becomes feedback, never a crash. Relay 503s fall through a model lineup.
-- **Token-cheap** — the ladder, all reflexes and 20 of 21 clutches spend zero tokens. The brain only fires when idle or interrupted.
+- **Token-cheap** — the ladder, all reflexes and 20 of 21 clutches spend zero tokens. The brain only fires when idle or interrupted, and pre-plans during long jobs so there is no visible thinking pause.
+- **No emergency can deadlock her** — a critical action that repeats without fixing its own trigger gets muted for 25s, so she can never freeze in a heal or retreat loop.
 - **Vanilla-legal** — 3.0 block reach, real cooldowns, no packet tricks. She plays legit, just perfectly.
 
 ---
@@ -543,13 +626,16 @@ Model probe against the live relay:
    ├── config.js         env
    ├── llm/              client (tiered + fallbacks), persona, brain
    ├── reflex/           survival, clutch, gear
-   ├── combat/           engine, targeting
-   ├── skills/           move, gather, craft, build, farm, storage, misc
+   ├── combat/           engine, targeting, params (tunable profile)
+   ├── skills/           move, gather, craft, build, farm, storage, enchant,
+   │                     nether, misc
    └── world/            state snapshot, memory, block & entity scanning
   scripts/
    ├── probe-llm.js      model selection evidence
-   ├── dry-run.js        46 offline checks
-   └── fake-owner.js     connects as the owner, tests obedience live
+   ├── dry-run.js        51 offline checks
+   ├── fake-owner.js     connects as the owner, tests obedience live
+   ├── spar.js           two bots duel in a fixed arena
+   └── tune.js           parameter sweep + confirmation run
 ```
 
 She remembers across restarts in `memory/trisha.json` — base, bed, chests, ore
@@ -566,13 +652,14 @@ locations, deaths, lessons, opponent profiles. Delete it to give her amnesia.
   [x] survival ladder, resumable
   [x] chat obedience, dual-path
   [x] live verification on a real 1.21.4 server
-  [ ] self-play tuning ........ hundreds of automated duels overnight, sweeping
-                                strafe radius / crit window / shield rhythm.
-                                turns hand-tuned guesses into measured optima.
-  [ ] opponent modelling ...... deeper per-player prediction
+  [x] self-play tuning ........ measured profile, confirmed 10-0 vs defaults
+  [x] endgame ladder .......... obsidian, books, enchanting, XP 30, nether
+  [x] speculative planning .... next action pre-planned during the current one
+  [ ] opponent modelling ...... deeper per-player prediction (profiles are
+                                recorded now; prediction is not wired in yet)
   [ ] blueprint building ...... .nbt / .schem megastructures
   [ ] self-written skills ..... she authors new routines at runtime (sandboxed)
-  [ ] speculative planning .... pre-plan the next action while one runs
+  [ ] multi-pass tuning ....... overnight sweeps with larger samples per candidate
 ```
 
 ---

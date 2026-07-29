@@ -20,6 +20,8 @@ import * as build from './skills/build.js';
 import * as farm from './skills/farm.js';
 import * as storage from './skills/storage.js';
 import * as misc from './skills/misc.js';
+import * as enchant from './skills/enchant.js';
+import * as nether from './skills/nether.js';
 
 const num = (v, d) => {
   const n = Number(v);
@@ -272,12 +274,23 @@ export const ACTIONS = {
     describe: 'heal{} gapple or potion, then wait to regenerate',
     run: async ({ bot, task, reflex }) => {
       await reflex.clutch.healClutch();
+      // Regeneration needs a near-full food bar. With nothing to eat, waiting here
+      // does nothing at all, so say so instead of blocking for 40 seconds.
+      const hasFood = !!reflex.bestFood(true);
+      const hasPotion = bot.inventory.items().some((i) => /golden_apple|^potion$/.test(i.name));
+      if (!hasFood && !hasPotion && bot.food < 18) {
+        return { ok: false, reason: 'nothing to heal with — need food' };
+      }
       let guard = 0;
+      const startHp = bot.health;
       while (bot.health < 18 && guard++ < 40 && !task.aborted) {
         await reflex.eatCheck().catch(() => {});
         await task.sleep(1000);
+        if (guard > 8 && bot.health <= startHp && bot.food < 18) {
+          return { ok: false, reason: 'not regenerating — food too low' };
+        }
       }
-      return { ok: true, detail: `hp ${bot.health}/20` };
+      return { ok: true, detail: `hp ${Math.round(bot.health)}/20` };
     },
   },
 
@@ -338,6 +351,53 @@ export const ACTIONS = {
     group: 'storage',
     describe: 'fillBucket{fluid} fill a bucket (water for MLG clutches)',
     run: ({ bot, task }, a) => misc.fillBucket(bot, task, { fluid: str(a.fluid, 'water') }),
+  },
+
+  // ── endgame ────────────────────────────────────────────────
+  getObsidian: {
+    group: 'endgame',
+    describe: 'getObsidian{count} mine obsidian, or cast it by pouring water on lava',
+    run: ({ bot, task }, a) => enchant.getObsidian(bot, task, { count: num(a.count, 10) }),
+  },
+  makeBooks: {
+    group: 'endgame',
+    describe: 'makeBooks{count} sugar cane to paper, cows to leather, then books',
+    run: ({ bot, task }, a) => enchant.makeBooks(bot, task, { count: num(a.count, 15) }),
+  },
+  bookshelves: {
+    group: 'endgame',
+    describe: 'bookshelves{count} build the bookshelf ring that unlocks level 30 enchants',
+    run: ({ bot, task }, a) => enchant.buildBookshelves(bot, task, { count: num(a.count, 15) }),
+  },
+  xpGrind: {
+    group: 'endgame',
+    describe: 'xpGrind{level} mine ore and fight until she hits an XP level',
+    run: ({ bot, task }, a) => enchant.xpGrind(bot, task, { level: num(a.level, 30) }),
+  },
+  enchant: {
+    group: 'endgame',
+    describe: 'enchant{item} enchant one item at the table',
+    run: ({ bot, task }, a) => enchant.enchantItem(bot, task, { item: str(a.item), choice: num(a.choice, 2) }),
+  },
+  enchantKit: {
+    group: 'endgame',
+    describe: 'enchantKit{} enchant sword, armour, pickaxe and bow',
+    run: ({ bot, task }, a) => enchant.enchantKit(bot, task, { minLevel: num(a.minLevel, 30) }),
+  },
+  netherPortal: {
+    group: 'endgame',
+    describe: 'netherPortal{} build and light a nether portal',
+    run: ({ bot, task }) => nether.buildNetherPortal(bot, task),
+  },
+  netherRun: {
+    group: 'endgame',
+    describe: 'netherRun{debris} portal in, mine ancient debris, come home',
+    run: ({ bot, task }, a) => nether.netherRun(bot, task, { debris: num(a.debris, 4) }),
+  },
+  netheriteIngot: {
+    group: 'endgame',
+    describe: 'netheriteIngot{count} smelt debris to scrap and craft ingots',
+    run: ({ bot, task }, a) => nether.makeNetheriteIngot(bot, task, { count: num(a.count, 1) }),
   },
 
   // ── meta ───────────────────────────────────────────────────

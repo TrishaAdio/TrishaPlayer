@@ -162,9 +162,22 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
   if (/_pickaxe|_sword|_axe|_shovel|_hoe|torch|bow|ladder|sign|arrow|rail/.test(name)) await ensureSticks(bot, task, 2);
   if (/table|chest|door|boat|stairs|slab|fence|bowl|bucket|shield|barrel/.test(name)) await ensurePlanks(bot, task, 6);
 
+  /**
+   * Inventory changes from the prerequisite crafts above need a moment to land
+   * before recipesFor sees them. Without this pause she would craft 12 birch
+   * planks and then be told she needs 4 pale_oak_planks, because recipesFor still
+   * saw an empty inventory and fell back to reporting an arbitrary recipe's
+   * missing ingredients.
+   */
+  await wait(260);
+
   // Try without a table first, then with one.
   let recipes = bot.recipesFor(id, null, 1, null);
   let table = null;
+  if (!recipes.length) {
+    await wait(320);
+    recipes = bot.recipesFor(id, null, 1, null);
+  }
   if (!recipes.length) {
     table = await ensureCraftingTable(bot, task);
     if (table) recipes = bot.recipesFor(id, null, 1, table);

@@ -82,9 +82,18 @@ export function standingDanger(bot) {
   if (feet && /fire/.test(feet.name)) return 'fire';
   if (under && /magma_block/.test(under.name)) return 'magma';
   if (feet && /powder_snow/.test(feet.name)) return 'powder_snow';
-  // Only a real emergency once the air bar is actually draining. Treating any
-  // submersion as drowning made her panic every time she swam.
-  if (bot.oxygenLevel !== undefined && bot.oxygenLevel < 10) return 'drowning';
+  /**
+   * Drowning requires actually being in water.
+   *
+   * Without the isInWater guard this fired continuously on dry land, because some
+   * servers leave bot.oxygenLevel at 0 when they never send an air update. The
+   * consequence was severe and non-obvious: the reflex layer "rescued" her from
+   * imaginary drowning several times a second, and each rescue called
+   * pathfinder.setGoal — which cancelled whatever path a skill was walking, so
+   * "come here" and "follow me" died instantly with "goal was changed".
+   */
+  const submerged = bot.entity?.isInWater || /water/.test(legs?.name || '') || /water/.test(feet?.name || '');
+  if (submerged && bot.oxygenLevel !== undefined && bot.oxygenLevel < 10) return 'drowning';
   return null;
 }
 

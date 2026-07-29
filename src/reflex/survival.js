@@ -207,6 +207,13 @@ export class Reflex extends EventEmitter {
     bot.setControlState('jump', true);
     await bot.lookAt(bot.entity.position.offset(0, 4, 0), true).catch(() => {});
 
+    // Taking the pathfinder cancels any path a skill is currently walking, so only
+    // do it when she is genuinely submerged and losing air.
+    if (!bot.entity.isInWater) {
+      bot.setControlState('jump', false);
+      return;
+    }
+
     const land = this.nearestDryLand();
     if (land) {
       bot.setControlState('jump', false);

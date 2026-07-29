@@ -55,6 +55,27 @@ const armorPieces = (bot) => {
   return slots.filter((i) => bot.inventory.slots[i]).length;
 };
 
+/**
+ * Enchantment detection via prismarine-item's `enchants` getter, which handles both
+ * the old NBT layout and 1.20.5+ item components. Reading raw NBT by hand would
+ * break the moment the format changed again.
+ */
+const enchantsOf = (it) => {
+  try {
+    return it?.enchants || [];
+  } catch {
+    return [];
+  }
+};
+
+const enchantedCount = (bot) => {
+  const worn = [5, 6, 7, 8].map((i) => bot.inventory.slots[i]).filter(Boolean);
+  const held = bot.inventory.items().filter((i) => /_sword$|_pickaxe$|^bow$/.test(i.name));
+  return [...worn, ...held].filter((it) => enchantsOf(it).length > 0).length;
+};
+
+const hasEnchantedGear = (bot) => enchantedCount(bot) > 0;
+
 const armorTier = (bot) => {
   const worn = [5, 6, 7, 8].map((i) => bot.inventory.slots[i]?.name || '');
   const rank = (n) =>
@@ -220,6 +241,69 @@ export const LADDER = [
       { name: 'equipBest', args: {} },
     ],
   },
+
+  // ── endgame ────────────────────────────────────────────────
+  // Enchanting is the biggest remaining power jump: Protection IV across four
+  // pieces roughly halves incoming damage, and Sharpness V adds about three
+  // hearts a swing. No combat tuning competes with that.
+  {
+    id: 'obsidian',
+    label: 'obsidian for a table',
+    done: (bot) => has(bot, 'obsidian', 4) || has(bot, 'enchanting_table') || hasEnchantedGear(bot),
+    actions: () => [{ name: 'getObsidian', args: { count: 10 } }],
+  },
+  {
+    id: 'books',
+    label: 'paper and leather into books',
+    done: (bot) => countAny(bot, 'book', 'bookshelf') >= 15 || hasEnchantedGear(bot),
+    actions: () => [{ name: 'makeBooks', args: { count: 15 } }],
+  },
+  {
+    id: 'enchant_setup',
+    label: 'enchanting table ringed with bookshelves',
+    done: (bot, ctx) => !!ctx.memory.all.waypoints?.enchanting || hasEnchantedGear(bot),
+    actions: () => [{ name: 'bookshelves', args: { count: 15 } }],
+  },
+  {
+    id: 'xp',
+    label: 'level 30',
+    done: (bot) => (bot.experience?.level ?? 0) >= 30 || hasEnchantedGear(bot),
+    actions: () => [{ name: 'xpGrind', args: { level: 30 } }],
+  },
+  {
+    id: 'enchanted_kit',
+    label: 'enchanted sword, armour and pickaxe',
+    done: (bot) => enchantedCount(bot) >= 4,
+    actions: () => [{ name: 'enchantKit', args: { minLevel: 30 } }, { name: 'equipBest', args: {} }],
+  },
+  {
+    id: 'gapples',
+    label: 'a golden apple in the pocket',
+    // Optional: gold is not always nearby, so she must not stall here forever.
+    done: (bot) => has(bot, 'golden_apple') || has(bot, 'enchanted_golden_apple') || countAny(bot, 'gold_ingot') < 8,
+    actions: () => [
+      { name: 'mine', args: { block: 'gold_ore', count: 8, optional: true } },
+      { name: 'smelt', args: { item: 'gold_ingot', count: 8 } },
+      { name: 'craft', args: { item: 'golden_apple', count: 1, optional: true } },
+    ],
+  },
+  {
+    id: 'netherite_ingots',
+    label: 'a nether trip for ancient debris',
+    /**
+     * Deliberately optional. Netherite *gear* needs a smithing template that only
+     * generates in bastion loot, which is out of reach for an unattended bot, so
+     * this rung is satisfied either by getting ingots or by simply not having the
+     * diamond pickaxe required to try. She never blocks the ladder on it.
+     */
+    done: (bot) => has(bot, 'netherite_ingot') || !has(bot, 'diamond_pickaxe') || enchantedCount(bot) < 4,
+    actions: () => [
+      { name: 'netherRun', args: { debris: 4 } },
+      { name: 'netheriteIngot', args: { count: 1 } },
+      { name: 'home', args: {} },
+      { name: 'deposit', args: { keep: 'gear,food,torch,blocks' } },
+    ],
+  },
 ];
 
 /** First unmet rung. Null means she has finished the whole ladder. */
@@ -252,6 +336,8 @@ export const ladderStatus = {
   count,
   countAny,
   has,
+  enchantedCount,
+  hasEnchantedGear,
   logs,
   planks,
   pickTier,

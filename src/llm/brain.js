@@ -43,6 +43,27 @@ export class Brain {
     this.lastLlmAt = 0;
     this.ladderDone = false;
     this.chatQueue = [];
+    this._spec = null;
+    this.specStats = { made: 0, used: 0, stale: 0 };
+    this._creeperTried = new Map();
+  }
+
+  /**
+   * Creepers she has already had a go at.
+   *
+   * Without this she re-engaged the same surviving creeper every few seconds —
+   * observed live as five consecutive bow attempts over forty seconds while the
+   * creeper simply walked around. One attempt, then leave it alone and get back to
+   * work; the dodge reflex keeps her safe regardless.
+   */
+  recentlyTriedCreeper(id) {
+    const t = this._creeperTried.get(id);
+    if (!t) return false;
+    if (Date.now() - t > 25000) {
+      this._creeperTried.delete(id);
+      return false;
+    }
+    return true;
   }
 
   ctx() {
@@ -117,6 +138,8 @@ export class Brain {
 
   acceptOrder(text, actions, interrupt = true) {
     if (!actions?.length) return;
+    // Anything he says invalidates whatever she was planning to do next.
+    this._spec = null;
     this.order = { text, at: Date.now(), actions: actions.map((a) => a.name) };
     if (interrupt) {
       this.executor.cancel('owner order');
@@ -181,6 +204,9 @@ export class Brain {
       if (!threat) return;
 
       this._lastDefence = Date.now();
+      if (threat.name === 'creeper' && threat.entity?.id != null) {
+        this._creeperTried.set(threat.entity.id, Date.now());
+      }
       const remaining = [...this.plan];
       log.brain(`self defence: ${threat.name || threat.username} at ${threat.distance}m (was ${this.executor.currentName || 'idle'})`);
 
@@ -208,17 +234,98 @@ export class Brain {
     }
   }
 
+  /**
+   * A coarse fingerprint of her situation.
+   *
+   * Deliberately lossy: HP and food are bucketed and only the shape of the world is
+   * captured. A speculative decision should stay valid while she finishes chopping a
+   * tree, and an exact signature would invalidate on every single tick of damage or
+   * hunger, making both the cache and the speculation useless.
+   */
+  stateKey() {
+    const bot = this.bot;
+    const hp = Math.floor((bot.health ?? 20) / 5);
+    const food = Math.floor((bot.food ?? 20) / 5);
+    const threats = Math.min(3, this.targeting.pick({ maxDistance: 12 }) ? 1 : 0);
+    const rung = this.ladderDone ? 'done' : currentRung(bot, this.ctx())?.id || 'done';
+    const t = bot.time?.timeOfDay ?? 0;
+    const night = t > 13000 && t < 23000 ? 'n' : 'd';
+    const dim = (bot.game?.dimension || 'ow').replace('minecraft:', '').slice(0, 3);
+    const gear = `${bot.heldItem?.name || 'none'}:${[5, 6, 7, 8].filter((i) => bot.inventory.slots[i]).length}`;
+    return `${rung}|${hp}|${food}|${threats}|${night}|${dim}|${gear}`;
+  }
+
+  /**
+   * SPECULATIVE PLANNING.
+   *
+   * The brain used to sit idle while an action ran, then stall for 2-8 seconds
+   * deciding what to do next — so every long job ended with a visible pause where
+   * she just stood there. Now the next decision is computed *during* the current
+   * action, and is waiting the instant it finishes.
+   *
+   * The state key guards correctness: a speculation computed for a situation that
+   * no longer applies is thrown away rather than acted on.
+   */
+  speculate() {
+    if (this._spec || this.thinking || !config.brain.autonomy) return;
+    if (Date.now() - this.lastLlmAt < config.brain.thinkIntervalMs) return;
+
+    const key = this.stateKey();
+    this._spec = { key, startedAt: Date.now(), action: null, pending: true };
+
+    this.think({ tier: 'fast', apply: false })
+      .then((action) => {
+        if (this._spec && this._spec.key === key) {
+          this._spec.action = action;
+          this._spec.pending = false;
+          if (action) {
+            this.specStats.made++;
+            log.debug(`speculated ${action.name} for [${key}]`);
+          }
+        }
+      })
+      .catch(() => {
+        this._spec = null;
+      });
+  }
+
+  /** Use a speculation only if the world still looks the way it did when planned. */
+  takeSpeculation() {
+    if (!this._spec || this._spec.pending || !this._spec.action) return null;
+    const spec = this._spec;
+    const fresh = this.stateKey() === spec.key && Date.now() - spec.startedAt < 45000;
+    this._spec = null;
+    if (!fresh) {
+      this.specStats.stale++;
+      log.debug('discarded a stale speculation');
+      return null;
+    }
+    this.specStats.used++;
+    return spec.action;
+  }
+
   async step() {
     const bot = this.bot;
     if (this.paused || !bot.entity || bot.health == null) return;
-    if (this.executor.busy) return;
-    if (this.thinking) return;
+    if (this.executor.busy) {
+      // Think ahead while her hands are busy, so the next decision costs no wait.
+      if (!this.plan.length && !this.order) this.speculate();
+      return;
+    }
+    if (this.thinking && !this._spec) return;
 
-    // 1. Emergencies the reflex layer cannot solve on its own.
-    const emergency = this.emergencyAction();
-    if (emergency) {
-      log.brain(`emergency: ${emergency.name}`);
-      await this.executor.run(emergency);
+    /**
+     * 1. Only genuinely life-threatening emergencies outrank RAREAURA.
+     *
+     * This used to be the whole emergency set, and it starved his orders: at 8 HP
+     * she entered a heal loop, and "come here" sat in the queue behind it for forty
+     * seconds while she stood still. Healing is important; it is not more important
+     * than answering the person she is here for.
+     */
+    const critical = this.criticalEmergency();
+    if (critical && this.allowCritical(critical)) {
+      log.brain(`critical: ${critical.name}`);
+      await this.executor.run(critical);
       return;
     }
 
@@ -235,7 +342,15 @@ export class Brain {
       return;
     }
 
-    // 3. The ladder — deterministic, free.
+    // 3. Housekeeping that matters but can wait for his orders to finish.
+    const soft = this.softEmergency();
+    if (soft) {
+      log.brain(`housekeeping: ${soft.name}`);
+      await this.executor.run(soft);
+      return;
+    }
+
+    // 4. The ladder — deterministic, free.
     if (config.ladder.onSpawn && !this.ladderDone) {
       const rung = currentRung(bot, this.ctx());
       if (rung) {
@@ -260,19 +375,82 @@ export class Brain {
 
     // 4. Nothing to do: let her decide for herself, but not too often.
     if (!config.brain.autonomy) return;
+
+    // A decision that was computed while she was working is free — take it now.
+    const speculated = this.takeSpeculation();
+    if (speculated) {
+      log.brain(`using pre-planned ${speculated.name} (no wait)`);
+      this.plan.push(speculated);
+      return;
+    }
+
+    if (this.thinking) return;
     if (Date.now() - this.lastLlmAt < config.brain.thinkIntervalMs) return;
     await this.think({ tier: 'fast' });
   }
 
-  /** Things that must happen right now but need a skill, not a reflex. */
-  emergencyAction() {
+  /**
+   * ANTI-THRASH GATE.
+   *
+   * A critical action that fails to change the condition that triggered it will be
+   * re-selected forever, and because criticals outrank everything she stops playing
+   * entirely. Seen live: `retreat` succeeding instantly and re-firing every second,
+   * and `heal` looping at 1 HP with nothing to eat.
+   *
+   * So an emergency that repeats without effect gets muted for a while, letting the
+   * ladder or the brain try something that might actually work.
+   */
+  allowCritical(action) {
+    const now = Date.now();
+    this._critGate = this._critGate || new Map();
+    const g = this._critGate.get(action.name) || { count: 0, first: now, mutedUntil: 0 };
+
+    if (now < g.mutedUntil) return false;
+    if (now - g.first > 20000) {
+      g.count = 0;
+      g.first = now;
+    }
+    g.count++;
+
+    if (g.count > 4) {
+      g.mutedUntil = now + 25000;
+      g.count = 0;
+      g.first = now;
+      this._critGate.set(action.name, g);
+      log.warn(`${action.name} kept firing without fixing anything — muting it for 25s`);
+      return false;
+    }
+    this._critGate.set(action.name, g);
+    return true;
+  }
+
+  /** About to die. These override everything, including his orders. */
+  criticalEmergency() {
     const bot = this.bot;
     const hp = bot.health;
     const hostiles = this.targeting.pick({ maxDistance: 12 });
 
     if (hp <= config.ladder.homeHp && hostiles) return { name: 'retreat', args: {} };
     if (bot.food <= 4 && !this.reflex.bestFood(true)) return { name: 'getFood', args: { urgent: true, count: 4 } };
-    if (hp < 12 && !hostiles) return { name: 'heal', args: {} };
+
+    /**
+     * Near-death healing outranks his orders, but only just barely.
+     *
+     * Moving heal out of the critical tier fixed order starvation, and then a live
+     * run had her walk 50 blocks to him on 1 HP because nothing stopped her. Both
+     * extremes are wrong. Four hearts is the line: below it she patches herself up
+     * first, above it she does what he asked.
+     */
+    if (hp <= 4) {
+      // Healing is only an answer if she has something to heal WITH. Natural
+      // regeneration needs a full food bar, so with an empty pack "heal" is a
+      // dead end — observed live as an endless heal loop at 1 HP with 9 food and
+      // no items. Get food first; that is what actually raises health.
+      const canHeal =
+        !!this.reflex.bestFood(true) ||
+        bot.inventory.items().some((i) => /golden_apple|^potion$/.test(i.name));
+      return canHeal ? { name: 'heal', args: {} } : { name: 'getFood', args: { urgent: true, count: 4 } };
+    }
 
     // A creeper she cannot shoot is a reason to leave, not to fight.
     const creeper = nearbyEntities(bot, 7).find((e) => e.name === 'creeper');
@@ -283,17 +461,9 @@ export class Brain {
       if (!canShoot) return { name: 'flee', args: { from: 'creeper', distance: 14 } };
     }
 
-    // SELF DEFENCE. Anything hostile that gets close gets dealt with, without
-    // waiting for the model to have an opinion about it. Without this she stands
-    // there being chewed on while the brain thinks.
-    if (hp > config.ladder.homeHp) {
-      const threat = this.nearestThreat();
-      if (threat) {
-        return { name: 'attack', args: { target: threat.username || threat.name || 'nearest' } };
-      }
-    }
-
-    // Owner under attack outranks everything except her own survival.
+    // Someone hitting RAREAURA is a critical emergency. This is the one thing she
+    // will drop an order for, because the order was almost certainly not
+    // "let that guy keep hitting me".
     const owner = bot.players[config.owner]?.entity;
     if (owner && hp > 10) {
       const attacker = [...this.targeting.ownerAttackers.entries()].find(([, t]) => Date.now() - t < 8000);
@@ -303,6 +473,26 @@ export class Brain {
           this.say('hands off him');
           return { name: 'attack', args: { target: e.username || e.name || 'nearest' } };
         }
+      }
+    }
+    return null;
+  }
+
+  /** Worth doing, but never at the cost of ignoring him. */
+  softEmergency() {
+    const bot = this.bot;
+    const hp = bot.health;
+    const hostiles = this.targeting.pick({ maxDistance: 12 });
+
+    if (hp < 12 && !hostiles) return { name: 'heal', args: {} };
+
+    // SELF DEFENCE. Anything hostile that gets close gets dealt with, without
+    // waiting for the model to have an opinion about it. Without this she stands
+    // there being chewed on while the brain thinks.
+    if (hp > config.ladder.homeHp) {
+      const threat = this.nearestThreat();
+      if (threat) {
+        return { name: 'attack', args: { target: threat.username || threat.name || 'nearest' } };
       }
     }
 
@@ -328,9 +518,11 @@ export class Brain {
 
     const candidates = nearbyEntities(bot, 10).filter((e) => {
       if (!e.isHostile) return false;
-      // Creepers: only pick a fight if she can do it from range. Otherwise the
-      // reflex dodge handles them and she keeps her distance.
-      if (e.name === 'creeper') return hasBow && e.distance > 5 && e.distance < 10;
+      // Creepers: only pick a fight if she can do it from range, and only once.
+      // Otherwise the reflex dodge handles them and she keeps her distance.
+      if (e.name === 'creeper') {
+        return hasBow && e.distance > 5 && e.distance < 10 && !this.recentlyTriedCreeper(e.entity.id);
+      }
       if (e.name === 'warden') return false; // nobody fights a warden. she leaves.
       if (/skeleton|stray|bogged|pillager|witch|blaze/.test(e.name)) return e.distance < 10;
       return e.distance < 7;
@@ -389,7 +581,7 @@ export class Brain {
    * Ask the model what to do. Strict JSON, validated against the registry;
    * anything invalid becomes feedback rather than a crash.
    */
-  async think({ tier = 'fast', stuckOn = null } = {}) {
+  async think({ tier = 'fast', stuckOn = null, apply = true } = {}) {
     if (this.thinking) return null;
     this.thinking = true;
     this.lastLlmAt = Date.now();
@@ -428,16 +620,21 @@ Rules:
       }
 
       if (json.remember) mem.addLesson(json.remember);
-      if (json.say) this.say(json.say);
+      // A speculation must not talk: it might never be acted on, and she would be
+      // announcing a plan she then discards.
+      if (json.say && apply) this.say(json.say);
 
       const action = json.action;
       if (!action?.name || !isValidAction(action.name)) {
         log.warn(`brain proposed invalid action: ${action?.name}`);
         return null;
       }
-      log.brain(`decided ${action.name} — ${json.why || ''}`);
-      this.plan.push({ name: action.name, args: action.args || {} });
-      return action;
+      const clean = { name: action.name, args: action.args || {} };
+      if (apply) {
+        log.brain(`decided ${action.name} — ${json.why || ''}`);
+        this.plan.push(clean);
+      }
+      return clean;
     } catch (err) {
       log.warn(`think failed: ${err.message}`);
       return null;
@@ -477,6 +674,10 @@ Rules:
 
   statsLine() {
     const s = llmStats();
-    return `llm: ${s.calls} calls, ${s.fails} fails, avg ${s.avgMs}ms | clutches: ${this.reflex.clutch.summary()}`;
+    const sp = this.specStats;
+    return (
+      `llm: ${s.calls} calls, ${s.fails} fails, avg ${s.avgMs}ms | ` +
+      `pre-planned: ${sp.used} used, ${sp.stale} stale | clutches: ${this.reflex.clutch.summary()}`
+    );
   }
 }

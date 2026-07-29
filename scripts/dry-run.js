@@ -9,7 +9,7 @@
  */
 import { fastParse } from '../src/chat/commands.js';
 import { ACTIONS, isValidAction, actionCatalogue } from '../src/actions.js';
-import { LADDER, currentRung, ladderProgress } from '../src/progression.js';
+import { LADDER, currentRung, ladderProgress, ladderStatus } from '../src/progression.js';
 import { config } from '../src/config.js';
 
 let pass = 0;
@@ -93,15 +93,43 @@ ok(
 
 console.log('\n5. SURVIVAL LADDER RESOLUTION\n');
 
-const makeBot = (items = [], armorSlots = {}) => ({
+const makeBot = (items = [], armorSlots = {}, extra = {}) => ({
   inventory: {
-    items: () => items.map((i) => ({ name: i[0], count: i[1], type: 1 })),
+    items: () => items.map((i) => ({ name: i[0], count: i[1], type: 1, enchants: i[2] || [] })),
     slots: { 5: armorSlots.head, 6: armorSlots.torso, 7: armorSlots.legs, 8: armorSlots.feet },
   },
   food: 20,
   health: 20,
+  experience: { level: extra.xp ?? 0 },
+  ...extra,
 });
-const ctxFor = (base = null) => ({ memory: { all: { base, bed: null } }, config: config.ladder, flags: {} });
+const ctxFor = (base = null, waypoints = {}, extra = {}) => ({
+  memory: { all: { base, bed: null, waypoints, ...extra } },
+  config: config.ladder,
+  flags: { returnedHome: true, ...(extra.flags || {}) },
+});
+
+/** Context for a bot that has already finished the early game. */
+const lateCtx = (waypoints = {}) =>
+  ctxFor({ x: 0, y: 64, z: 0 }, waypoints, { shelterBuilt: true, bed: { x: 0, y: 64, z: 2 } });
+
+const DIAMOND_ARMOR = {
+  head: { name: 'diamond_helmet', enchants: [] },
+  torso: { name: 'diamond_chestplate', enchants: [] },
+  legs: { name: 'diamond_leggings', enchants: [] },
+  feet: { name: 'diamond_boots', enchants: [] },
+};
+const ENCHANTED_ARMOR = {
+  head: { name: 'diamond_helmet', enchants: [{ name: 'protection', lvl: 4 }] },
+  torso: { name: 'diamond_chestplate', enchants: [{ name: 'protection', lvl: 4 }] },
+  legs: { name: 'diamond_leggings', enchants: [{ name: 'protection', lvl: 4 }] },
+  feet: { name: 'diamond_boots', enchants: [{ name: 'protection', lvl: 4 }] },
+};
+const FULL_KIT = [
+  ['bread', 12], ['oak_log', 10], ['crafting_table', 1], ['furnace', 1], ['torch', 30],
+  ['shield', 1], ['cobblestone', 30], ['water_bucket', 1], ['diamond', 4],
+  ['diamond_pickaxe', 1], ['diamond_sword', 1], ['cooked_beef', 10],
+];
 
 const fresh = makeBot([]);
 ok(currentRung(fresh, ctxFor(null))?.id === 'orient', 'fresh spawn starts at orient');
@@ -136,7 +164,51 @@ ok(
 const progress = ladderProgress(gifted, ctxFor({ x: 0, y: 64, z: 0 }));
 ok(progress.doneCount >= 8, 'ladder progress counts correctly', `${progress.doneCount}/${progress.total} done`);
 
-console.log('\n6. REGISTRY HEALTH\n');
+console.log('\n6. ENDGAME LADDER (enchanting is the real power ceiling)\n');
+
+// Fully kitted in plain diamond -> the next job is obsidian for a table.
+const diamondReady = makeBot(FULL_KIT, DIAMOND_ARMOR, { xp: 5 });
+const dr = currentRung(diamondReady, lateCtx());
+ok(dr?.id === 'obsidian', 'full plain diamond moves on to obsidian', `-> ${dr?.id}`);
+
+// Table and shelves up, level 30 reached -> time to actually enchant.
+const readyToEnchant = makeBot(
+  [...FULL_KIT, ['obsidian', 4], ['book', 15]],
+  DIAMOND_ARMOR,
+  { xp: 30 },
+);
+const rte = currentRung(readyToEnchant, lateCtx({ enchanting: { x: 1, y: 64, z: 1 } }));
+ok(rte?.id === 'enchanted_kit', 'table + books + level 30 leads to enchanting', `-> ${rte?.id}`);
+
+// Enchanted gear detected via prismarine-item's enchants getter.
+const enchanted = makeBot(
+  [...FULL_KIT, ['diamond_sword', 1, [{ name: 'sharpness', lvl: 5 }]]],
+  ENCHANTED_ARMOR,
+  { xp: 12 },
+);
+ok(
+  require_enchantCount(enchanted) >= 4,
+  'enchanted armour is recognised',
+  `${require_enchantCount(enchanted)} enchanted pieces`,
+);
+const er = currentRung(enchanted, lateCtx({ enchanting: { x: 1, y: 64, z: 1 } }));
+ok(
+  er === null || ['gapples', 'netherite_ingots'].includes(er.id),
+  'enchanted kit skips straight past the setup rungs',
+  `-> ${er?.id ?? 'ladder complete'}`,
+);
+
+// The netherite rung must never be a wall, since the smithing template is
+// bastion-only and unreachable for an unattended bot.
+const noPick = makeBot([['bread', 5]], ENCHANTED_ARMOR, { xp: 5 });
+const nr = LADDER.find((r) => r.id === 'netherite_ingots');
+ok(nr.done(noPick, ctxFor({ x: 0, y: 64, z: 0 })), 'netherite rung never blocks the ladder', 'optional as designed');
+
+function require_enchantCount(bot) {
+  return ladderStatus.enchantedCount(bot);
+}
+
+console.log('\n7. REGISTRY HEALTH\n');
 ok(Object.keys(ACTIONS).length >= 40, 'action count', `${Object.keys(ACTIONS).length} actions`);
 const noRun = Object.entries(ACTIONS).filter(([, d]) => typeof d.run !== 'function');
 ok(noRun.length === 0, 'every action has an implementation', noRun.map(([n]) => n).join(', '));
