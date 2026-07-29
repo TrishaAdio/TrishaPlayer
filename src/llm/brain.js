@@ -239,8 +239,37 @@ export class Brain {
    */
   stuckWatch() {
     const CHECK_MS = 4000;
-    const STUCK_AFTER = 26000;   // action running, no movement
     const IDLE_AFTER = 20000;    // nothing running, nothing queued
+
+    /**
+     * PER-ACTION TIME BUDGETS.
+     *
+     * A single global threshold was wrong and actively harmful. Chopping trees means
+     * walking between them, and a run legitimately goes a minute without a block
+     * breaking — so a 28-second budget killed it, the ladder restarted it from zero,
+     * and she looped forever while crafting failed for want of the wood she kept not
+     * collecting. Observed live as chopWood being cancelled twice in ninety seconds.
+     *
+     * Budgets are generous for anything that travels, and tight only for things that
+     * should be instant.
+     */
+    const BUDGET = {
+      // travel and gathering: minutes are normal
+      chopWood: 150000, mine: 180000, branchMine: 300000, collectDrops: 60000,
+      explore: 120000, goto: 120000, come: 120000, home: 180000, follow: 999999,
+      getFood: 180000, forageFood: 180000, butcher: 150000, getWool: 150000,
+      farmCrops: 120000, harvest: 120000, digDown: 180000, netherRun: 600000,
+      xpGrind: 300000, base: 300000, shelter: 120000, bridge: 120000,
+      // stationary but productive
+      craft: 45000, smelt: 120000, deposit: 45000, withdraw: 45000, enchant: 60000,
+      bookshelves: 120000, upgradeNetherite: 60000, placeBed: 45000,
+      // fights end or they do not
+      attack: 90000, duel: 120000, hunt: 180000, defend: 999999, kite: 90000,
+      // truly instant
+      equipBest: 15000, placeBlock: 20000, lightArea: 60000, markHome: 10000,
+      say: 5000, idle: 999999, sleep: 999999, fish: 999999, heal: 60000,
+    };
+    const DEFAULT_BUDGET = 60000;
 
     this._lastPos = null;
     this._stillSince = Date.now();
@@ -288,18 +317,34 @@ export class Brain {
       if (holding) return; // she was told to stand still; standing still is correct
 
       // Case 1: an action is running but she is frozen in place.
-      if (busy && now - this._stillSince > STUCK_AFTER) {
+      if (busy) {
         const name = this.executor.currentName;
-        // Actions that are legitimately motionless AND make no inventory change.
-        if (['sleep', 'idle', 'fish', 'smelt'].includes(name)) {
+        const budget = BUDGET[name] ?? DEFAULT_BUDGET;
+        const idleFor = now - this._stillSince;
+
+        if (idleFor > budget) {
+          log.warn(`stuck: ${name} made no progress for ${Math.round(idleFor / 1000)}s (budget ${Math.round(budget / 1000)}s) — unsticking`);
+          await this.unstick().catch(() => {});
+          this.executor.cancel('stuck');
           this._stillSince = now;
-          return;
+          this._spec = null;
+
+          /**
+           * Do not let the ladder immediately re-run the thing that just hung. Count
+           * it against the rung so that after a couple of attempts the rung escalates
+           * or is skipped, instead of cycling forever.
+           */
+          if (this.currentRungId) {
+            this.rungFailures.set(this.currentRungId, (this.rungFailures.get(this.currentRungId) || 0) + 1);
+          }
+          this._stuckCounts = this._stuckCounts || new Map();
+          const n = (this._stuckCounts.get(name) || 0) + 1;
+          this._stuckCounts.set(name, n);
+          if (n >= 3) {
+            log.warn(`${name} has hung ${n} times — leaving it alone for a while`);
+            this.plan = this.plan.filter((a) => a.name !== name);
+          }
         }
-        log.warn(`stuck: ${name} has made no progress for ${Math.round((now - this._stillSince) / 1000)}s — unsticking`);
-        await this.unstick().catch(() => {});
-        this.executor.cancel('stuck');
-        this._stillSince = now;
-        this._spec = null;
         return;
       }
 
@@ -608,7 +653,8 @@ export class Brain {
       return;
     }
 
-    // 4. The ladder — deterministic, free.
+    // 4. The ladder — deterministic, free. Skipped entirely in stability mode, where
+    //    she waits for orders instead of running her own agenda.
     if (config.ladder.onSpawn && !this.ladderDone) {
       const rung = currentRung(bot, this.ctx());
       if (rung) {
