@@ -82,15 +82,31 @@ async function clearVolume(bot, task, min, max) {
   return dug;
 }
 
-/** Enough wall material, mined on the spot if she is short. */
+/**
+ * Enough wall material, mined on the spot if she is short — but in batches.
+ *
+ * Asking for the whole structure up front produced "mining 144x stone", a request so
+ * large that she disappeared into a mining loop for minutes and never laid a block.
+ * Gathering is now capped per trip, and building proceeds with whatever she has:
+ * a partially walled base is progress, an endless quarry is not.
+ */
+const GATHER_BATCH = 48;
+
 async function ensureBlocks(bot, task, needed) {
-  let have = WALL_MATS.reduce((n, m) => n + count(bot, m), 0);
-  if (have >= needed) return true;
-  log.act(`need ${needed - have} more building blocks`);
+  const have = () => WALL_MATS.reduce((n, m) => n + count(bot, m), 0);
+  if (have() >= needed) return true;
+
+  const want = Math.min(needed - have(), GATHER_BATCH);
+  log.act(`need ${needed - have()} building blocks, gathering ${want} now`);
   const { mine } = await import('./gather.js');
-  await mine(bot, task, { block: 'stone', count: needed - have + 8 }).catch(() => {});
-  have = WALL_MATS.reduce((n, m) => n + count(bot, m), 0);
-  return have >= Math.min(needed, 12);
+  const res = await mine(bot, task, { block: 'stone', count: want }).catch((e) => {
+    if (e?.aborted) throw e;
+    return { ok: false };
+  });
+  if (!res.ok && res.reason) log.warn(`block gathering fell short: ${res.reason}`);
+
+  // Enough to be useful is enough to start.
+  return have() >= Math.min(needed, 16);
 }
 
 /**
@@ -162,7 +178,11 @@ export async function buildBase(bot, task, { size = 7, near = 'here' } = {}) {
 
   log.act(`building a ${inner}x${inner} base at ${origin.x},${origin.y},${origin.z}`);
   const needed = inner * inner + inner * 4 * height;
-  await ensureBlocks(bot, task, Math.min(needed, 140));
+  // One batch before starting; the walls top themselves up as they go.
+  const gathered = await ensureBlocks(bot, task, Math.min(needed, GATHER_BATCH));
+  if (!gathered) {
+    return { ok: false, reason: 'not enough building blocks and none to mine nearby' };
+  }
 
   const min = origin.offset(-half, 0, -half);
   const max = origin.offset(half, height, half);

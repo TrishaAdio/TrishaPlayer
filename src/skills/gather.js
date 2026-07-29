@@ -60,25 +60,84 @@ export function inventoryFull(bot) {
   return used / 36;
 }
 
-/** Dig one block properly: right tool, safety check, then pick up what drops. */
+/**
+ * Blocks that would not break. A dig can fail repeatedly for reasons she cannot see
+ * — out of reach by a hair, protected region, claim plugin — and without a memory of
+ * that she picks the same block again immediately and locks up on it.
+ */
+const digBlacklist = new Map();
+const blacklistKey = (p) => `${p.x},${p.y},${p.z}`;
+
+export function isBlacklisted(pos) {
+  const until = digBlacklist.get(blacklistKey(pos));
+  if (!until) return false;
+  if (Date.now() > until) {
+    digBlacklist.delete(blacklistKey(pos));
+    return false;
+  }
+  return true;
+}
+
+function blacklist(pos, ms = 120000) {
+  digBlacklist.set(blacklistKey(pos), Date.now() + ms);
+}
+
+/**
+ * Dig one block properly: right tool, safety check, then pick up what drops.
+ *
+ * The timeout is the important part. bot.dig() can hang indefinitely — the server
+ * never confirms the break, and the promise simply never settles. Observed live as
+ * her standing frozen at one coordinate for over three minutes in the digging
+ * posture, mining nothing, with nothing at all in the log. A dig that overruns three
+ * times its expected duration is not going to finish.
+ */
 export async function digBlock(bot, task, block, { safety = true } = {}) {
   task.check();
   if (!block) return false;
+  if (isBlacklisted(block.position)) return false;
   if (safety && !isSafeToDig(bot, block)) {
     log.reflex(`refusing to dig ${block.name} at ${block.position} — fluid behind it`);
+    blacklist(block.position, 60000);
     return false;
   }
-  if (!bot.canDigBlock(block)) return false;
+  if (!bot.canDigBlock(block)) {
+    blacklist(block.position, 60000);
+    return false;
+  }
 
   await equipTool(bot, block);
+
+  let expected = 3000;
   try {
-    await bot.dig(block);
+    expected = bot.digTime(block) || 3000;
+  } catch {}
+  const limit = Math.min(20000, Math.max(4000, expected * 3 + 1500));
+
+  let timer;
+  try {
+    await Promise.race([
+      bot.dig(block),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`dig timed out after ${limit}ms`)), limit);
+      }),
+    ]);
     mem.bump('blocksMined');
     return true;
   } catch (err) {
     if (task.aborted) throw new AbortError();
-    log.debug(`dig failed: ${err.message}`);
+    try {
+      bot.stopDigging();
+    } catch {}
+    if (/timed out/.test(err.message)) {
+      log.warn(`dig stalled on ${block.name} at ${block.position} — skipping it`);
+      blacklist(block.position, 180000);
+    } else {
+      log.debug(`dig failed: ${err.message}`);
+      blacklist(block.position, 30000);
+    }
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -131,9 +190,35 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
   let got = 0;
   let misses = 0;
 
+  /**
+   * Hard stall detection, inside the loop.
+   *
+   * Relying on the outer watchdog was not enough: a `mine` nested inside `base`
+   * inherited the parent's five-minute budget, so she stood at one coordinate for
+   * three minutes in the digging animation while nothing was logged and nothing gave
+   * up. This loop now polices itself — it reports progress out loud, and if it cannot
+   * break a single block in a reasonable window it stops and says why.
+   */
+  const startedAt = Date.now();
+  let lastProgressAt = Date.now();
+  let lastReportAt = Date.now();
+  const STALL_MS = 35000;
+  const HARD_LIMIT_MS = 150000;
+
   log.act(`mining ${count}x ${names[0]}`);
 
   while (got < count && misses < 6) {
+    const now = Date.now();
+    if (now - lastProgressAt > STALL_MS) {
+      return { ok: got > 0, detail: `mined ${got}x ${names[0]} then stalled`, got, reason: `could not break any ${names[0]} for ${Math.round(STALL_MS / 1000)}s` };
+    }
+    if (now - startedAt > HARD_LIMIT_MS) {
+      return { ok: got > 0, detail: `mined ${got}x ${names[0]} (time limit)`, got };
+    }
+    if (now - lastReportAt > 15000) {
+      lastReportAt = now;
+      log.act(`still mining: ${got}/${count} ${names[0]}`);
+    }
     task.check();
     if (toolNearlyBroken(bot)) {
       const spare = bestPickaxe(bot);
@@ -141,7 +226,7 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
     }
     if (inventoryFull(bot) > 0.95) return { ok: true, detail: `got ${got}, inventory full`, got };
 
-    const positions = bot.findBlocks({ matching: ids, maxDistance, count: 12 });
+    const positions = bot.findBlocks({ matching: ids, maxDistance, count: 12 }).filter((p) => !isBlacklisted(p));
     if (!positions.length) {
       misses++;
       if (optional) return { ok: true, detail: `no ${names[0]} nearby`, got };
@@ -166,6 +251,7 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
       if (veined > 0) {
         got += veined;
         progressed = true;
+        lastProgressAt = Date.now();
       }
     }
     if (!progressed) misses++;

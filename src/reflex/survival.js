@@ -147,6 +147,58 @@ export class Reflex extends EventEmitter {
 
     // 5. Shield discipline against arrows and blasts.
     await this.shieldCheck();
+
+    // 6. Control hygiene.
+    this.controlHygiene();
+  }
+
+  /**
+   * CONTROL HYGIENE.
+   *
+   * Movement keys are set by several systems — combat strafing, flee, unstick, the
+   * creeper dodge — and any of them can be interrupted between pressing a key and
+   * releasing it. The result is a bot holding sprint and forward with nothing
+   * steering her, grinding into a wall indefinitely. Reported directly: "it still
+   * stuck on sprint on this area".
+   *
+   * So: if no path is active and nothing is deliberately steering, and she has not
+   * actually moved, let go of the keys.
+   */
+  controlHygiene() {
+    const bot = this.bot;
+    const held = ['forward', 'back', 'left', 'right', 'sprint'].filter((c) => bot.controlState?.[c]);
+    if (!held.length) {
+      this._heldSince = 0;
+      return;
+    }
+
+    /**
+     * mineflayer-pathfinder exposes isMoving(), not a `goal` property — checking for
+     * `.goal` is always false, which would have made this release her controls in the
+     * middle of legitimate pathfinding. Verified against the plugin source.
+     */
+    const pathing = typeof bot.pathfinder?.isMoving === 'function' ? bot.pathfinder.isMoving() : false;
+    const steering = pathing || this.escaping || this.clutch?.busy || bot.trisha?.combat?.active;
+    if (steering) {
+      this._heldSince = 0;
+      this._lastMovePos = bot.entity.position.clone();
+      return;
+    }
+
+    const pos = bot.entity.position;
+    const moved = !this._lastMovePos || this._lastMovePos.distanceTo(pos) > 0.4;
+    this._lastMovePos = pos.clone();
+    if (moved) {
+      this._heldSince = 0;
+      return;
+    }
+
+    if (!this._heldSince) this._heldSince = Date.now();
+    if (Date.now() - this._heldSince > 2500) {
+      log.reflex(`releasing stuck controls (${held.join(', ')}) — pressed but going nowhere`);
+      for (const c of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(c, false);
+      this._heldSince = 0;
+    }
   }
 
   /**

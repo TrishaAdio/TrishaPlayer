@@ -255,11 +255,11 @@ export class Brain {
      */
     const BUDGET = {
       // travel and gathering: minutes are normal
-      chopWood: 150000, mine: 180000, branchMine: 300000, collectDrops: 60000,
-      explore: 120000, goto: 120000, come: 120000, home: 180000, follow: 999999,
-      getFood: 180000, forageFood: 180000, butcher: 150000, getWool: 150000,
-      farmCrops: 120000, harvest: 120000, digDown: 180000, netherRun: 600000,
-      xpGrind: 300000, base: 300000, shelter: 120000, bridge: 120000,
+      chopWood: 90000, mine: 60000, branchMine: 180000, collectDrops: 45000,
+      explore: 90000, goto: 90000, come: 90000, home: 120000, follow: 999999,
+      getFood: 120000, forageFood: 120000, butcher: 90000, getWool: 90000,
+      farmCrops: 90000, harvest: 90000, digDown: 120000, netherRun: 600000,
+      xpGrind: 180000, base: 120000, shelter: 90000, bridge: 90000,
       // stationary but productive
       craft: 45000, smelt: 120000, deposit: 45000, withdraw: 45000, enchant: 60000,
       bookshelves: 120000, upgradeNetherite: 60000, placeBed: 45000,
