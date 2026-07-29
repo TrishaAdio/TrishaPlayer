@@ -376,6 +376,9 @@ export class Brain {
       if (!busy && !this.plan.length) {
         if (now - this._idleSince > IDLE_AFTER) {
           this._idleSince = now;
+          // In stability mode standing still IS the job — waiting for orders is not a
+          // fault, so do not nag about it every twenty seconds.
+          if (!config.ladder.onSpawn && !config.brain.autonomy) return;
           if (!this.ladderDone) {
             log.warn('idle with an empty queue — forcing a ladder re-evaluation');
             this.rungFailures.clear();
