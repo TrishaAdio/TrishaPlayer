@@ -51,6 +51,17 @@ const A = (name, args = {}) => ({ name, args });
  * Every entry returns { actions, reply, priority }.
  */
 const RULES = [
+  /**
+   * Greetings are conversation, not orders.
+   *
+   * Without this rule "trisha hi" fell through to the LLM, which decided the right
+   * response to a greeting was to walk across the map — so on a live server she
+   * answered "hi" three times and each time reported "done — arrived".
+   */
+  {
+    re: /^(hi|hey|hello|yo|sup|hii+|heya|gm|good morning|good night|gn|thanks|ty|thank you|gg|nice|lol|ok|okay)\b\s*$/,
+    build: () => ({ actions: [], reply: null, greeting: true }),
+  },
   // stop / hold
   {
     re: /^(stop|wait|halt|stay|hold on|chill|freeze|cancel|nvm|never mind)\b/,

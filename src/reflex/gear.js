@@ -18,7 +18,21 @@ const ARMOR_SLOTS = [
   { dest: 'feet', suffix: '_boots', slot: 8, extra: [] },
 ];
 
-const WEAPON_ORDER = ['netherite_sword', 'diamond_sword', 'iron_sword', 'netherite_axe', 'diamond_axe', 'stone_sword', 'iron_axe', 'golden_sword', 'stone_axe', 'wooden_sword', 'wooden_axe'];
+/**
+ * Weapon preference, best damage first.
+ *
+ * The tail matters: observed live, she was "killing mobs with hands" early game,
+ * because before her first sword the list ran out and she punched. A wooden pickaxe
+ * does more damage than a fist and a shovel does more than nothing, so tools are
+ * included as a last resort. Fists are never the answer while she is holding metal.
+ */
+const WEAPON_ORDER = [
+  'netherite_sword', 'diamond_sword', 'iron_sword', 'netherite_axe', 'diamond_axe',
+  'stone_sword', 'iron_axe', 'golden_sword', 'stone_axe', 'wooden_sword', 'wooden_axe',
+  // last-resort improvised weapons, in damage order
+  'netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe',
+  'netherite_shovel', 'diamond_shovel', 'iron_shovel', 'stone_shovel', 'wooden_shovel',
+];
 
 /**
  * Axes, best first. Kept separate from WEAPON_ORDER because the axe is a tactical

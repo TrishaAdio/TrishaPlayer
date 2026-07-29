@@ -228,6 +228,42 @@ export class CombatEngine {
     return { patch, notes };
   }
 
+  /**
+   * LATENCY COMPENSATION.
+   *
+   * Her parameters were tuned in a sandbox at ~1ms ping. A real server is not that:
+   * RAREAURA's is ~250ms round trip, and at that distance two things break.
+   *
+   * First, the server sees her swing a quarter of a second after she decides to make
+   * it, so a swing fired the instant her local cooldown expires can arrive before the
+   * server's cooldown has refilled — and a too-early swing deals a fraction of full
+   * damage. Adding part of the latency as slack keeps every hit at full strength.
+   *
+   * Second, entity positions she receives are already stale by one round trip, so an
+   * opponent at a locally-measured 3.0 blocks may really be further away. Sitting
+   * slightly tighter keeps her inside genuine reach.
+   *
+   * Measured live: 15 swings for 5 kills at 246ms, which is a lot of wasted swings.
+   */
+  applyLatencyCompensation() {
+    const bot = this.bot;
+    const ping = bot.players?.[bot.username]?.ping ?? bot._client?.latency ?? 0;
+    this.lastPing = ping;
+    if (!ping || ping < 60) return; // local or near-local: leave the tuned profile alone
+
+    const slack = Math.min(140, Math.round(ping * 0.3));
+    const tighten = Math.min(0.35, ping / 900);
+
+    this._latencyPatch = this.p;
+    this.p = {
+      ...this.p,
+      cooldownSlackMs: Math.max(this.p.cooldownSlackMs || 0, slack),
+      engageRange: Math.max(2.7, (this.p.engageRange || 3.1) - tighten),
+      tooClose: Math.max(1.4, (this.p.tooClose || 1.8) - 0.15),
+    };
+    log.act(`ping ${ping}ms — compensating (+${slack}ms swing slack, engage ${this.p.engageRange.toFixed(2)})`);
+  }
+
   /** Apply an opponent-specific patch for the duration of one fight. */
   applyStrategy(target) {
     const { patch, notes } = this.strategyFor(target);
@@ -242,6 +278,10 @@ export class CombatEngine {
     if (this._basePatch) {
       this.p = this._basePatch;
       this._basePatch = null;
+    }
+    if (this._latencyPatch) {
+      this.p = this._latencyPatch;
+      this._latencyPatch = null;
     }
   }
 
@@ -357,6 +397,9 @@ export class CombatEngine {
     const isPlayer = target.type === 'player';
     const profile = this.profileFor(target);
     if (profile) profile.fights++;
+    // Compensate for network latency before anything else — on a remote server this
+    // matters more than any tuning parameter.
+    this.applyLatencyCompensation();
     // Fight this specific person the way they have shown they play.
     if (isPlayer) this.applyStrategy(target);
     let theirJumps = 0;
@@ -391,6 +434,10 @@ export class CombatEngine {
           mem.bump(isPlayer ? 'playerKills' : 'kills');
           if (profile) profile.wins = (profile.wins || 0) + 1;
           log.act(`${target.username || target.name} down`);
+          // Pick up what it dropped. Observed live: she was killing mobs and walking
+          // away from the meat, then going hungry later with food on the ground behind
+          // her. A kill is not finished until the drops are collected.
+          await this.lootKill(target).catch(() => {});
           return { ok: true, killed: true };
         }
         if (Date.now() - started > timeoutMs) return { ok: false, reason: 'fight timed out' };
@@ -550,6 +597,21 @@ export class CombatEngine {
     bot.setControlState('sprint', false);
     await wait(this.p.sprintResetMs);
     bot.setControlState('sprint', true);
+  }
+
+  /**
+   * Collect what a kill dropped. Dynamic import keeps combat and gathering from
+   * forming a circular dependency at module load.
+   */
+  async lootKill(target) {
+    const bot = this.bot;
+    try {
+      await wait(700); // let the drops actually spawn
+      const { collectDrops } = await import('../skills/gather.js');
+      const { Task } = await import('../task.js');
+      const res = await collectDrops(bot, new Task('loot'), { radius: 8, quiet: true });
+      if (res?.got) log.act(`looted ${res.got} drop(s) from ${target.username || target.name}`);
+    } catch {}
   }
 
   /** Break off cleanly: shield up, walk backwards, then run. */

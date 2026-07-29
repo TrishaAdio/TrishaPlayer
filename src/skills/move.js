@@ -25,10 +25,23 @@ export function installMovement(bot) {
 
   m.canDig = true;
   m.allow1by1towers = true;
-  m.allowParkour = true;
   m.allowSprinting = true;
   m.allowFreeMotion = false;
-  // Never take fall damage on purpose.
+
+  /**
+   * Parkour, deliberately generous.
+   *
+   * RAREAURA singled this out as the thing she does best, and it is also genuinely
+   * faster than digging or bridging: a bot that can jump a 3-block gap takes direct
+   * routes a walking bot cannot. Sprint-jumping is enabled alongside it so the jumps
+   * have the momentum to actually land.
+   */
+  m.allowParkour = true;
+  m.allowSprinting = true;
+  if ('maxParkourJump' in m) m.maxParkourJump = 4;
+  if ('parkourCost' in m) m.parkourCost = 1; // stop treating jumps as expensive
+
+  // Never take fall damage on purpose. Parkour is fine; falling is not.
   m.maxDropDown = 3;
   m.infiniteLiquidDropdownDistance = false;
   m.dontCreateFlow = true;
@@ -98,9 +111,17 @@ export async function goTo(bot, task, x, y, z, { range = 1, timeoutMs = 90000, s
         await bot.pathfinder.goto(new GoalNear(x, y, z, Math.max(range + 3, 4)));
         return { ok: true, loose: true };
       } catch (e2) {
+        /**
+         * Re-check for cancellation before reporting a plain failure. Without this the
+         * second attempt swallowed the abort and returned "cannot reach ...: the goal
+         * was changed", which upstream treated as a real navigation failure and
+         * retried — re-queueing a command the owner had already replaced.
+         */
+        if (task.aborted) throw new AbortError(task.reason);
         return { ok: false, reason: `cannot reach ${Math.round(x)},${Math.round(y)},${Math.round(z)}: ${e2.message}` };
       }
     }
+    if (task.aborted) throw new AbortError(task.reason);
     return { ok: false, reason: err.message };
   } finally {
     clearInterval(watchdog);
@@ -116,14 +137,35 @@ export function ownerEntity(bot) {
   return bot.players[config.owner]?.entity || null;
 }
 
-/** "trisha come here" */
+/**
+ * "trisha come here"
+ *
+ * Two attempts, because an exact 3D goal fails in exactly the situation where he most
+ * often calls her: standing on a cliff, a roof or a tower while she is in water 15
+ * blocks below. Observed live as "cannot reach -19,78,-33" over and over while she
+ * treaded water. The fallback aims at his horizontal position and lets her climb,
+ * which is good enough — being 3 blocks under him is arriving.
+ */
 export async function come(bot, task, { range = 2 } = {}) {
   const owner = ownerEntity(bot);
   if (!owner) return { ok: false, reason: `cannot see ${config.owner}` };
-  const p = owner.position;
-  const res = await goTo(bot, task, p.x, p.y, p.z, { range });
+
+  const res = await goTo(bot, task, owner.position.x, owner.position.y, owner.position.z, { range });
   if (res.ok) return { ok: true, detail: 'arrived' };
-  return res;
+  task.check();
+
+  const live = ownerEntity(bot) || owner;
+  log.act('direct path failed — approaching his column instead');
+  try {
+    await bot.pathfinder.goto(new GoalXZ(Math.round(live.position.x), Math.round(live.position.z)));
+  } catch (err) {
+    if (task.aborted) throw new AbortError(task.reason);
+  }
+
+  const now = ownerEntity(bot);
+  const dist = now ? bot.entity.position.distanceTo(now.position) : Infinity;
+  if (dist <= 12) return { ok: true, detail: `got within ${dist.toFixed(1)}m` };
+  return { ok: false, reason: `could not get to you (${Number.isFinite(dist) ? `${dist.toFixed(0)}m away` : 'lost sight of you'})` };
 }
 
 /** Persistent follow — keeps re-goaling as the owner moves. */

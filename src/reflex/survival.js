@@ -216,20 +216,29 @@ export class Reflex extends EventEmitter {
 
     const land = this.nearestDryLand();
     if (land) {
-      bot.setControlState('jump', false);
+      /**
+       * Swim out using raw controls, NOT the pathfinder.
+       *
+       * Calling pathfinder.setGoal here cancelled whatever path a skill was walking,
+       * and every cancellation surfaced as "the goal was changed before it could be
+       * completed". On a live server this is what made "come here" and "follow me"
+       * fail over and over near water: the reflex layer and the skill layer were
+       * fighting for the same steering wheel. The reflex now steers manually and never
+       * touches the shared pathfinder.
+       */
       log.reflex(`swimming to land at ${land.x},${land.y},${land.z}`);
-      try {
-        const { goals } = await import('../skills/move.js');
-        bot.pathfinder.setGoal(new goals.GoalNear(land.x, land.y, land.z, 1));
-        // Give it a few seconds, then hand control back.
-        for (let i = 0; i < 24; i++) {
-          await this.wait(250);
-          if (!bot.entity.isInWater && bot.entity.onGround) break;
-        }
-      } catch {}
-      try {
-        bot.pathfinder.setGoal(null);
-      } catch {}
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        if (!bot.entity.isInWater && bot.entity.onGround) break;
+        await bot.lookAt(land.offset(0.5, 0.5, 0.5), true).catch(() => {});
+        bot.setControlState('forward', true);
+        bot.setControlState('jump', true); // keeps her swimming up and afloat
+        bot.setControlState('sprint', true);
+        await this.wait(250);
+      }
+      bot.setControlState('forward', false);
+      bot.setControlState('jump', false);
+      bot.setControlState('sprint', false);
     } else {
       // Nothing dry in range: keep swimming up and forward.
       bot.setControlState('forward', true);

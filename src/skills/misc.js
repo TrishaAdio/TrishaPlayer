@@ -55,6 +55,79 @@ export async function sleepNow(bot, task) {
   }
 }
 
+/**
+ * Wool for a bed. Shears if she has them (3 wool per sheep, sheep survives),
+ * otherwise she kills them — a sheep drops 1 wool, so 3 sheep for one bed.
+ */
+export async function getWool(bot, task, { count: want = 3 } = {}) {
+  const have = () => bot.inventory.items().reduce((n, i) => (/_wool$/.test(i.name) ? n + i.count : n), 0);
+  if (have() >= want) return { ok: true, detail: `already have ${have()} wool` };
+
+  const { butcher } = await import('./farm.js');
+  const { collectDrops } = await import('./gather.js');
+  const shears = bot.inventory.items().find((i) => i.name === 'shears');
+
+  let guard = 0;
+  while (have() < want && guard++ < 5) {
+    task.check();
+    const sheep = Object.values(bot.entities)
+      .filter((e) => e?.name === 'sheep' && e.position)
+      .map((e) => ({ e, d: bot.entity.position.distanceTo(e.position) }))
+      .sort((a, b) => a.d - b.d)[0];
+
+    if (!sheep) {
+      const { explore } = await import('./move.js');
+      await explore(bot, task, { radius: 56 }).catch(() => {});
+      continue;
+    }
+
+    if (shears) {
+      // Shearing yields more wool and leaves the sheep alive to regrow it.
+      const { goTo } = await import('./move.js');
+      await goTo(bot, task, sheep.e.position.x, sheep.e.position.y, sheep.e.position.z, { range: 2, timeoutMs: 20000 }).catch(() => {});
+      try {
+        await bot.equip(shears, 'hand');
+        await bot.lookAt(sheep.e.position.offset(0, 0.8, 0), true);
+        await bot.activateEntity(sheep.e);
+        await task.sleep(600);
+      } catch {}
+      await collectDrops(bot, task, { radius: 6, quiet: true }).catch(() => {});
+    } else {
+      await butcher(bot, task, { animal: 'sheep', count: Math.max(1, want - have()) }).catch(() => {});
+    }
+  }
+
+  const got = have();
+  return { ok: got > 0, detail: `wool: ${got}/${want}`, got, reason: got < want ? 'not enough sheep around' : undefined };
+}
+
+/** Place a bed she is carrying and remember where it is. */
+export async function placeBed(bot, task) {
+  const bed = bot.inventory.items().find((i) => /_bed$/.test(i.name));
+  if (!bed) return { ok: false, reason: 'no bed to place' };
+
+  const { placeAt } = await import('./build.js');
+  const base = bot.entity.position.floored();
+  // A bed needs two free blocks side by side, with solid ground under both.
+  for (const off of [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [0, 2]]) {
+    task.check();
+    const pos = base.offset(off[0], 0, off[1]);
+    const here = bot.blockAt(pos);
+    const next = bot.blockAt(pos.offset(off[0] === 0 ? 1 : 0, 0, off[0] === 0 ? 0 : 1));
+    const floor = bot.blockAt(pos.offset(0, -1, 0));
+    if (!here || !next || !floor) continue;
+    if (here.boundingBox !== 'empty' || next.boundingBox !== 'empty') continue;
+    if (floor.boundingBox !== 'block') continue;
+
+    if (await placeAt(bot, task, pos, bed.name)) {
+      mem.setBed(pos);
+      log.act(`bed placed at ${pos.x},${pos.y},${pos.z}`);
+      return { ok: true, detail: 'bed placed' };
+    }
+  }
+  return { ok: false, reason: 'no flat two-block space for a bed' };
+}
+
 export async function wakeUp(bot) {
   try {
     await bot.wake();

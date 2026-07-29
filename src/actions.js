@@ -269,6 +269,16 @@ export const ACTIONS = {
     describe: 'sleep{} sleep in a bed to skip the night',
     run: ({ bot, task }) => misc.sleepNow(bot, task),
   },
+  getWool: {
+    group: 'survive',
+    describe: 'getWool{count} shear or kill sheep for wool',
+    run: ({ bot, task }, a) => misc.getWool(bot, task, { count: num(a.count, 3) }),
+  },
+  placeBed: {
+    group: 'survive',
+    describe: 'placeBed{} place a bed and remember it',
+    run: ({ bot, task }) => misc.placeBed(bot, task),
+  },
   heal: {
     group: 'survive',
     describe: 'heal{} gapple or potion, then wait to regenerate',

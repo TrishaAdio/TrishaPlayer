@@ -115,7 +115,10 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
         await fish(bot, task, { count: 2 }).catch(() => {});
       }
     }
-    return { ok: total(bot, [...RAW, ...COOKED]) > 0, detail: 'grabbed emergency food' };
+    const got = total(bot, [...RAW, ...COOKED]);
+    return got > 0
+      ? { ok: true, detail: `grabbed emergency food (${got})`, got }
+      : { ok: false, reason: 'nothing edible around — no animals, crops or fish in range' };
   }
 
   let guard = 0;

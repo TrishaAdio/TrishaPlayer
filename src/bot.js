@@ -95,6 +95,29 @@ function setup(bot) {
   });
 
   // She reacts when her player takes a hit, without being asked.
+  /**
+   * TAKING DAMAGE MUST INTERRUPT WHATEVER SHE IS DOING.
+   *
+   * The brain's step loop returns early while an action runs, so a long job like
+   * mining a vein left nothing watching her health. She was killed by a player
+   * mid-mine without ever reacting. A big hit now forces an immediate decision:
+   * fight back if the attacker is fair game, otherwise disengage and heal.
+   */
+  reflex.on('bigHit', (amount) => {
+    if (bot.health == null) return;
+    const inCombat = ['attack', 'duel', 'defend', 'retreat', 'hunt', 'kite'].includes(executor.currentName);
+    if (inCombat) return;
+
+    const threat = brain.nearestThreat();
+    if (threat) {
+      log.warn(`took ${amount} damage from ${threat.username || threat.name} — fighting back`);
+      brain.acceptOrder('(under attack)', [{ name: 'attack', args: { target: threat.username || threat.name } }], true);
+    } else if (bot.health <= 10) {
+      log.warn(`took ${amount} damage from something unseen at ${Math.round(bot.health)} hp — breaking off`);
+      brain.acceptOrder('(hurt by something unseen)', [{ name: 'retreat', args: {} }], true);
+    }
+  });
+
   reflex.on('ownerHurt', () => {
     if (!executor.busy || executor.currentName !== 'attack') {
       const threat = targeting.pick({ maxDistance: 14 });
@@ -104,7 +127,14 @@ function setup(bot) {
     }
   });
 
-  reflex.on('panic', (reason) => log.warn(`panic: ${reason}`));
+  // Rate-limited: a recurring hazard like swimming in an ocean used to print a
+  // panic/recovered pair every second and bury everything else in the log.
+  let lastPanicLog = 0;
+  reflex.on('panic', (reason) => {
+    if (Date.now() - lastPanicLog < 15000) return;
+    lastPanicLog = Date.now();
+    log.warn(`panic: ${reason}`);
+  });
   reflex.on('clutch', (name) => {
     if (/totem|stash|wall off/.test(name)) brain.say(name === 'loot stash' ? 'stashing my stuff!' : 'that was close');
   });

@@ -164,7 +164,13 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
 
   // Common prerequisites first.
   if (/planks$/.test(name)) await ensurePlanks(bot, task, want);
-  if (/_pickaxe|_sword|_axe|_shovel|_hoe|torch|bow|ladder|sign|arrow|rail/.test(name)) await ensureSticks(bot, task, 2);
+  if (/_pickaxe|_sword|_axe|_shovel|_hoe|torch|bow|ladder|sign|arrow|rail/.test(name)) {
+    await ensureSticks(bot, task, 2);
+    // Wooden and stone tools also need planks or cobble for the head. Only sticks
+    // were being reserved, so she would craft one tool and then be a plank short of
+    // the next one with logs still in her pack.
+    if (/^wooden_/.test(name)) await ensurePlanks(bot, task, 4);
+  }
   if (/table|chest|door|boat|stairs|slab|fence|bowl|bucket|shield|barrel/.test(name)) await ensurePlanks(bot, task, 6);
 
   /**
@@ -191,22 +197,31 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
   if (!recipes.length) {
     const all = bot.recipesAll(id, null, table);
 
-    if (!all.length) {
-      // Distinguish "impossible" from "needs a bench" — the old message claimed
-      // wooden_pickaxe was not craftable, which was simply wrong and unactionable.
-      if (!table) {
-        const bench = await ensureCraftingTable(bot, task);
-        if (bench) {
-          const retry = bot.recipesFor(id, null, 1, bench);
-          if (retry.length) {
-            recipes = retry;
-            table = bench;
-          }
-        }
-        if (!recipes.length) return { ok: !!optional, reason: `${name} needs a crafting table` };
-      } else {
-        return { ok: !!optional, reason: `${name} is not craftable` };
+    /**
+     * A 3x3 recipe returns nothing at all without a bench, which is indistinguishable
+     * from "impossible" unless you go and get one first. Get the bench, then re-ask.
+     *
+     * Reporting matters here: this path previously returned "wooden_sword needs a
+     * crafting table" even when she was standing at a table she had just placed and
+     * the real problem was two missing planks. A wrong diagnosis sent me looking in
+     * the wrong place, so now it falls through to the real materials check.
+     */
+    let allWithBench = all;
+    if (!allWithBench.length && !table) {
+      const bench = await ensureCraftingTable(bot, task);
+      if (bench) {
+        table = bench;
+        const retry = bot.recipesFor(id, null, 1, bench);
+        if (retry.length) recipes = retry;
+        allWithBench = bot.recipesAll(id, null, bench);
       }
+    }
+
+    if (!recipes.length && !allWithBench.length) {
+      return {
+        ok: !!optional,
+        reason: table ? `${name} is not craftable` : `${name} needs a crafting table and she has none`,
+      };
     }
 
     if (!recipes.length) {
@@ -218,7 +233,7 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
        * first one returned is arbitrary. Scoring by how much is missing makes her
        * choose the variant matching the wood she actually has.
        */
-      const scored = all
+      const scored = allWithBench
         .map((r) => {
           const missing = missingFor(bot, r);
           return { recipe: r, missing, cost: missing.reduce((s, m) => s + m.need, 0) };
@@ -229,8 +244,19 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
       if (depth < 2 && best.missing.length) {
         for (const m of best.missing) {
           task.check();
-          const sub = await craft(bot, task, { item: m.name, count: m.need, optional: true, depth: depth + 1 });
-          if (!sub.ok) log.debug(`sub-craft ${m.name} failed: ${sub.reason || ''}`);
+          /**
+           * Ask for the TOTAL she needs to end up holding, not the shortfall.
+           *
+           * missingFor already subtracted what she has, so passing the shortfall made
+           * the sub-craft hit its own "already have N" early return and do nothing.
+           * Live consequence: she had 1 plank, needed 2 for a wooden sword, and the
+           * sub-craft for "1 dark_oak_planks" saw 1 in the pack and returned success
+           * without crafting — so the sword failed forever and the ladder deadlocked
+           * on wood_tools with a chest full of logs.
+           */
+          const target = count(bot, m.name) + m.need;
+          const sub = await craft(bot, task, { item: m.name, count: target, optional: true, depth: depth + 1 });
+          if (!sub.ok) log.debug(`sub-craft ${m.name} x${target} failed: ${sub.reason || ''}`);
         }
         await wait(300);
         recipes = bot.recipesFor(id, null, 1, table || undefined);

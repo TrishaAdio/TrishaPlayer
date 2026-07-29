@@ -26,6 +26,8 @@ const PLANKS = LOGS.map((l) => l.replace('_log', '_planks'));
 const logs = (bot) => countAny(bot, ...LOGS);
 const planks = (bot) => countAny(bot, ...PLANKS);
 
+export const BED_NAMES = ['white_bed', 'red_bed', 'blue_bed', 'green_bed', 'yellow_bed', 'black_bed', 'brown_bed', 'cyan_bed', 'gray_bed', 'light_blue_bed', 'light_gray_bed', 'lime_bed', 'magenta_bed', 'orange_bed', 'pink_bed', 'purple_bed'];
+
 const FOODS = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken', 'cooked_rabbit', 'cooked_cod', 'cooked_salmon', 'bread', 'baked_potato', 'golden_carrot', 'apple', 'carrot', 'melon_slice', 'sweet_berries'];
 const RAW_MEAT = ['beef', 'porkchop', 'mutton', 'chicken', 'rabbit', 'cod', 'salmon'];
 
@@ -118,13 +120,17 @@ export const LADDER = [
   },
   {
     id: 'wood_tools',
-    label: 'crafting table and first pickaxe',
-    done: (bot) => pickTier(bot) >= 1 && has(bot, 'crafting_table'),
+    label: 'crafting table, pickaxe and a sword',
+    done: (bot) => pickTier(bot) >= 1 && swordTier(bot) >= 1 && has(bot, 'crafting_table'),
     actions: () => [
       { name: 'craft', args: { item: 'crafting_table', count: 1 } },
       { name: 'craft', args: { item: 'stick', count: 8 } },
       { name: 'craft', args: { item: 'wooden_pickaxe', count: 1 } },
+      // A sword this early is what stops her punching zombies. The old rung made a
+      // pickaxe and an axe and left her with no weapon at all for the first night.
+      { name: 'craft', args: { item: 'wooden_sword', count: 1 } },
       { name: 'craft', args: { item: 'wooden_axe', count: 1 } },
+      { name: 'equipBest', args: {} },
     ],
   },
   {
@@ -167,11 +173,24 @@ export const LADDER = [
   },
   {
     id: 'shelter',
-    label: 'a safe place to log off and sleep',
+    label: 'a safe place to log off',
     done: (bot, ctx) => !!ctx.memory.all.bed || !!ctx.memory.all.shelterBuilt,
+    actions: () => [{ name: 'shelter', args: {} }],
+  },
+  {
+    id: 'bed',
+    label: 'wool, a bed, and a way to skip the night',
+    /**
+     * A real rung of its own. The old version tacked an optional bed craft onto the
+     * shelter rung, which never fired because 3 wool is not something she happens to
+     * be carrying — so she spent every night awake being shot at. Sheep first, then
+     * the bed, then actually sleep in it.
+     */
+    done: (bot, ctx) => !!ctx.memory.all.bed || has(bot, 'white_bed') || countAny(bot, ...BED_NAMES) > 0,
     actions: () => [
-      { name: 'shelter', args: {} },
-      { name: 'craft', args: { item: 'bed', count: 1, optional: true } },
+      { name: 'getWool', args: { count: 3 } },
+      { name: 'craft', args: { item: 'white_bed', count: 1, optional: true } },
+      { name: 'placeBed', args: {} },
     ],
   },
   {

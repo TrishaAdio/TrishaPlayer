@@ -73,9 +73,26 @@ export class Brain {
   // ───────────────────────── speech ─────────────────────────
   say(text) {
     if (!text) return;
-    let msg = String(text).replace(/\s+/g, ' ').trim().slice(0, 200);
+    let msg = String(text).replace(/\s+/g, ' ').trim();
+
+    /**
+     * Strip emoji. The persona forbids them, but the chat model kept adding hearts
+     * anyway — and on a live server she greeted RAREAURA with "hey babe! missed you"
+     * three times in a row, each with a different heart, so the repeat filter did not
+     * catch any of them.
+     */
+    msg = msg
+      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2764}\u{1F000}-\u{1F0FF}]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
     if (!msg) return;
-    if (msg === this.lastSaid && Date.now() - this.lastSpoke < 20000) return; // no repeating herself
+
+    // Compare on a normalised form so punctuation and emoji cannot smuggle a
+    // duplicate past the filter.
+    const key = msg.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+    if (key === this._lastSaidKey && Date.now() - this.lastSpoke < 25000) return;
+    this._lastSaidKey = key;
     if (Date.now() - this.lastSpoke < 1200) {
       setTimeout(() => this.say(text), 1300);
       return;
@@ -110,6 +127,12 @@ export class Brain {
       log.brain(`fast path: ${fast.actions.map((a) => a.name).join(' -> ') || 'talk only'}`);
       if (fast.statusQuery) {
         this.say(this.statusLine());
+        return;
+      }
+      if (fast.greeting) {
+        // Answer warmly, do not go anywhere.
+        const reply = await smallTalk(this.bot, username, message, this.stateText());
+        this.say(reply || 'hey you');
         return;
       }
       if (fast.stopOnly) {
@@ -191,6 +214,106 @@ export class Brain {
     log.brain('brain online');
     this.tickLoop();
     this.defenceWatch();
+    this.stuckWatch();
+  }
+
+  /**
+   * STUCK WATCHDOG.
+   *
+   * Observed live: "she stucks sometime cant do anything stands". An action can hang
+   * without failing — pathfinder quietly gives up, a dig target becomes unreachable,
+   * a goal is never satisfied — and because the executor still counts as busy, the
+   * brain politely waits forever and she just stands there.
+   *
+   * So: watch her actual position. If she has not moved and the same action has been
+   * running for a while, treat it as hung. Physically unstick first (jump, sidestep,
+   * dig out if she is walled in), then cancel so the ladder or the brain can choose
+   * something new.
+   */
+  stuckWatch() {
+    const CHECK_MS = 4000;
+    const STUCK_AFTER = 26000;   // action running, no movement
+    const IDLE_AFTER = 20000;    // nothing running, nothing queued
+
+    this._lastPos = null;
+    this._stillSince = Date.now();
+    this._idleSince = Date.now();
+
+    this._stuckTimer = setInterval(async () => {
+      if (!this.running || this.paused || !this.bot.entity) return;
+      const now = Date.now();
+      const pos = this.bot.entity.position;
+
+      const moved = !this._lastPos || this._lastPos.distanceTo(pos) > 0.6;
+      this._lastPos = pos.clone();
+      if (moved) this._stillSince = now;
+
+      const busy = this.executor.busy;
+      const holding = this.holdUntil && now < this.holdUntil;
+      if (holding) return; // she was told to stand still; standing still is correct
+
+      // Case 1: an action is running but she is frozen in place.
+      if (busy && now - this._stillSince > STUCK_AFTER) {
+        const name = this.executor.currentName;
+        // Sleeping, waiting and smelting are legitimately motionless.
+        if (['sleep', 'idle', 'smelt', 'craft', 'heal', 'deposit', 'withdraw', 'enchant'].includes(name)) {
+          this._stillSince = now;
+          return;
+        }
+        log.warn(`stuck: ${name} has run ${Math.round((now - this._stillSince) / 1000)}s without moving — unsticking`);
+        await this.unstick().catch(() => {});
+        this.executor.cancel('stuck');
+        this._stillSince = now;
+        this._spec = null;
+        return;
+      }
+
+      // Case 2: nothing running, nothing queued, and no one is talking to her.
+      if (!busy && !this.plan.length) {
+        if (now - this._idleSince > IDLE_AFTER) {
+          this._idleSince = now;
+          if (!this.ladderDone) {
+            log.warn('idle with an empty queue — forcing a ladder re-evaluation');
+            this.rungFailures.clear();
+          } else {
+            this.think({ tier: 'fast' }).catch(() => {});
+          }
+        }
+      } else {
+        this._idleSince = now;
+      }
+    }, CHECK_MS);
+    this._stuckTimer.unref?.();
+  }
+
+  /** Physically get her moving again: jump, sidestep, and dig out if enclosed. */
+  async unstick() {
+    const bot = this.bot;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    try {
+      bot.pathfinder.setGoal(null);
+    } catch {}
+    for (const c of ['forward', 'back', 'left', 'right', 'sprint']) bot.setControlState(c, false);
+
+    // Walled in? Dig the block in front of her face rather than shoving at it.
+    const eye = bot.entity.position.offset(0, 1, 0);
+    const yaw = bot.entity.yaw;
+    const ahead = eye.offset(-Math.sin(yaw), 0, -Math.cos(yaw)).floored();
+    const block = bot.blockAt(ahead);
+    if (block && block.boundingBox === 'block' && !/bedrock|water|lava/.test(block.name)) {
+      const { digBlock } = await import('../skills/gather.js');
+      const { Task } = await import('../task.js');
+      await digBlock(bot, new Task('unstick'), block, { safety: true }).catch(() => {});
+    }
+
+    bot.setControlState('jump', true);
+    bot.setControlState('forward', true);
+    await wait(500);
+    bot.setControlState('jump', false);
+    // Sidestep, because "forward" is often exactly the direction that is blocked.
+    bot.setControlState(Math.random() < 0.5 ? 'left' : 'right', true);
+    await wait(500);
+    for (const c of ['forward', 'left', 'right']) bot.setControlState(c, false);
   }
 
   /**
@@ -259,6 +382,7 @@ export class Brain {
   stop() {
     this.running = false;
     if (this._defenceTimer) clearInterval(this._defenceTimer);
+    if (this._stuckTimer) clearInterval(this._stuckTimer);
   }
 
   async tickLoop() {
@@ -380,8 +504,57 @@ export class Brain {
     // 2. Queued plan (from his orders, or from a ladder rung).
     if (this.plan.length) {
       const next = this.plan.shift();
+      const orderAtStart = this.order; // so a new order mid-action is detectable
       const result = await this.executor.run(next);
-      if (!result.ok && !result.aborted) await this.handleFailure(next, result);
+
+      /**
+       * Orders must not fail silently.
+       *
+       * Reported live: "go chop woods, come back to me, protect me — nothing worked".
+       * The actions were failing and she said nothing, so from his side she looked
+       * like she was ignoring him. Now a failed order gets one retry, and if it still
+       * fails she says out loud what went wrong.
+       */
+      /**
+       * A cancelled action must never be retried.
+       *
+       * Live failure: he said "trisha come", then "trisha get foods". The new order
+       * cancelled the running `come`, which surfaced as a normal failure ("the goal was
+       * changed") rather than an abort — so the retry pushed `come` back on top of the
+       * food order and buried it. From his side she ignored him and wandered off.
+       *
+       * So: only retry if this order is still the current one, and never retry a step
+       * that failed because something interrupted it.
+       */
+      const interrupted =
+        result.aborted ||
+        /goal was changed|interrupted|cancelled|aborted|superseded/i.test(result.reason || '');
+      const orderStillCurrent = this.order && this.order === orderAtStart;
+
+      if (!result.ok && !result.aborted) {
+        const isOrder = !!this.order;
+        const retried = this._retried === next.name;
+        if (isOrder && !retried && !interrupted && orderStillCurrent) {
+          this._retried = next.name;
+          log.brain(`order step ${next.name} failed (${result.reason}) — retrying once`);
+          this.plan.unshift(next);
+          return;
+        }
+        if (interrupted) {
+          log.debug(`${next.name} was interrupted — not retrying`);
+          this._retried = null;
+          return;
+        }
+        this._retried = null;
+        if (isOrder) {
+          this.say(this.shortExcuse(result.reason));
+          log.warn(`order failed: ${next.name} — ${result.reason}`);
+        }
+        await this.handleFailure(next, result);
+      } else {
+        this._retried = null;
+      }
+
       if (!this.plan.length && this.order) {
         const done = this.order;
         this.order = null;
@@ -559,11 +732,23 @@ export class Brain {
       }
     }
 
-    // Night, outside, no shelter, and things are spawning.
+    // Night handling. If she owns a bed, the correct move is to use it — sleeping
+    // skips the mob hours entirely and sets her respawn point. She was standing
+    // outside all night instead, which is how most of her deaths happened.
     const t = bot.time?.timeOfDay ?? 0;
     const isNight = t > 13000 && t < 23000;
-    if (isNight && !mem.all.bed && !mem.all.shelterBuilt && this.targeting.pick({ maxDistance: 16 })) {
-      return { name: 'shelter', args: {} };
+    if (isNight) {
+      const hasBed = bot.inventory.items().some((i) => /_bed$/.test(i.name)) || !!mem.all.bed;
+      if (hasBed && !this._sleepTried) {
+        this._sleepTried = true;
+        setTimeout(() => {
+          this._sleepTried = false;
+        }, 60000);
+        return { name: 'sleep', args: {} };
+      }
+      if (!mem.all.bed && !mem.all.shelterBuilt && this.targeting.pick({ maxDistance: 16 })) {
+        return { name: 'shelter', args: {} };
+      }
     }
     return null;
   }
@@ -579,7 +764,21 @@ export class Brain {
       bot.inventory.items().some((i) => i.name === 'bow' || i.name === 'crossbow') &&
       bot.inventory.items().some((i) => /arrow/.test(i.name));
 
-    const candidates = nearbyEntities(bot, 10).filter((e) => {
+    const candidates = nearbyEntities(bot, 12).filter((e) => {
+      /**
+       * PLAYERS. This filter used to require isHostile, which is false for every
+       * player — so the self-defence watcher was structurally incapable of reacting
+       * to a human. Live consequence: a player called Rupam beat her to death while
+       * she carried on mining, no engage and no retreat, from 15 HP to dead in 17
+       * seconds.
+       *
+       * The targeting layer already encodes the policy properly (provoked, attacking
+       * the owner, or free-for-all mode), so defer to its score rather than guessing
+       * here. Self-defence still means self-defence: an unprovoked player scores
+       * negative and is left alone.
+       */
+      if (e.isPlayer) return this.targeting.score(e) > 0 && e.distance < 12;
+
       if (!e.isHostile) return false;
       // Creepers: only pick a fight if she can do it from range, and only once.
       // Otherwise the reflex dodge handles them and she keeps her distance.
