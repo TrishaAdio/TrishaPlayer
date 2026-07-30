@@ -75,6 +75,14 @@ export const IRON_FOR_KIT = 30;
 export const IRON_TARGET = IRON_FOR_KIT + 3;
 
 /**
+ * Has the iron problem been solved, one way or another? Either she has mined the budget,
+ * or she is already standing in iron-tier-or-better gear. Shared by the iron rung and by
+ * its preparation rung, which is pointless once this is true.
+ */
+const ironSecured = (bot) =>
+  ironBudget(bot) >= IRON_TARGET || (wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3);
+
+/**
  * All four pieces worn, each one actually iron (or better) and in its own slot.
  *
  * Counting "four occupied armour slots" would happily accept a leather cap and three
@@ -332,7 +340,8 @@ export const LADDER = [
      */
     optional: true,
     done: (bot) =>
-      logs(bot) + Math.floor(planks(bot) / 4) >= 4 && count(bot, 'stick') >= 8 && ownedCount(bot, 'stone_pickaxe') >= 2,
+      ironSecured(bot) ||
+      (logs(bot) + Math.floor(planks(bot) / 4) >= 4 && count(bot, 'stick') >= 8 && ownedCount(bot, 'stone_pickaxe') >= 2),
     actions: () => [
       { name: 'chopWood', args: { count: 8 } },
       { name: 'craft', args: { item: 'stick', count: 16, optional: true } },
@@ -354,8 +363,7 @@ export const LADDER = [
      * iron-tier or better — someone handed her diamond, or she looted it. Requiring the
      * ingots unconditionally would send a fully diamond-equipped bot back down the mine.
      */
-    done: (bot) =>
-      ironBudget(bot) >= IRON_TARGET || (wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3),
+    done: ironSecured,
     /**
      * Kit up BEFORE descending. A branch-mining trip outlasts several stone pickaxes,
      * and replacing one at Y=16 needs a bench and sticks in her pack — without them the
