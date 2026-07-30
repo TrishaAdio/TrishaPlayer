@@ -1072,11 +1072,51 @@ export class Brain {
     }
   }
 
+  /**
+   * No weapon and no armour. Fighting is not a plan, it is a way to die.
+   */
+  defenceless() {
+    return ladderStatus.swordTier(this.bot) === 0 && ladderStatus.armorPieces(this.bot) === 0;
+  }
+
   /** About to die. These override everything, including his orders. */
   criticalEmergency() {
     const bot = this.bot;
     const hp = bot.health;
     const hostiles = this.targeting.pick({ maxDistance: 12 });
+
+    /**
+     * THE SPAWN DEATH-SPIRAL.
+     *
+     * One run died eight times in five minutes. The first death dropped all her gear;
+     * she respawned at world spawn at night, and because the ladder is stateless it sent
+     * her straight back to `wood` — walking bare-handed past the zombies that had just
+     * killed her. Then again. And again, every forty seconds.
+     *
+     * With no sword and no armour the only correct move is to stop playing and get
+     * behind a wall. Ten seconds in a sealed hole costs nothing; the alternative cost
+     * eight deaths and every item she owned.
+     */
+    const closeHostiles = nearbyEntities(bot, 9).filter((e) => e.isHostile && !FLYING.has(e.name));
+    if (closeHostiles.length && this.defenceless()) {
+      const names = closeHostiles.map((e) => e.name).join(', ');
+      if (!this._defencelessLogged || Date.now() - this._defencelessLogged > 20000) {
+        this._defencelessLogged = Date.now();
+        log.warn(`defenceless with ${closeHostiles.length} hostile(s) close (${names}) — walling up instead of working`);
+      }
+      /**
+       * Wall up once, then SIT THERE until it is safe — do not immediately dig out into
+       * the same mob. Holding position keeps reflexes and real emergencies live while
+       * refusing to resume ladder work through a zombie.
+       */
+      if (this._shelteredAt && Date.now() - this._shelteredAt < 90000) {
+        this.holdUntil = Date.now() + 15000;
+        return null;
+      }
+      this._shelteredAt = Date.now();
+      // Sealing in beats running: zombies are as fast as she is, and there are several.
+      return { name: 'shelter', args: {} };
+    }
 
     if (hp <= config.ladder.homeHp && hostiles) return { name: 'retreat', args: {} };
     if (bot.food <= 4 && !this.reflex.bestFood(true)) return { name: 'getFood', args: { urgent: true, count: 4 } };
