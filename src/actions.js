@@ -539,12 +539,26 @@ export class Executor {
     this.currentName = name;
     const t0 = Date.now();
 
+    /**
+     * Start and finish both get logged, with the arguments and how long it took.
+     * Without the start line a hung action is invisible — the log simply stops, and it
+     * is impossible to tell a frozen task from a slow one after the fact.
+     */
+    const bot = this.ctx.bot;
+    const at = () => {
+      const p = bot?.entity?.position;
+      return p ? `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}` : '?';
+    };
+    const argText = Object.keys(args).length ? ` ${JSON.stringify(args)}` : '';
+    log.act(`>> ${name}${argText} | at ${at()} | hp ${Math.round(bot?.health ?? 0)} | food ${bot?.food ?? 0}`);
+
     try {
       const result = (await def.run({ ...this.ctx, task }, args)) || { ok: true };
       const record = { name, args, ...result, ms: Date.now() - t0 };
       this.history.unshift(record);
       this.history = this.history.slice(0, 12);
-      log.act(`${name} -> ${result.ok ? 'ok' : 'FAILED'}${result.detail ? `: ${result.detail}` : result.reason ? `: ${result.reason}` : ''}`);
+      const outcome = result.detail ? `: ${result.detail}` : result.reason ? `: ${result.reason}` : '';
+      log.act(`<< ${name} -> ${result.ok ? 'ok' : 'FAILED'}${outcome} | ${((Date.now() - t0) / 1000).toFixed(1)}s | at ${at()}`);
       return record;
     } catch (err) {
       if (err instanceof AbortError || err?.aborted) {

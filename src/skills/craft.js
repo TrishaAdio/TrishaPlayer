@@ -31,6 +31,38 @@ const SMELT_INPUT = {
 
 const FUELS = ['coal', 'charcoal', 'coal_block', 'blaze_rod', 'dried_kelp_block', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'oak_log', 'birch_log', 'spruce_log', 'stick', 'bamboo'];
 
+/**
+ * How many items one unit of each fuel smelts.
+ *
+ * This matters more than it looks. The old code always loaded `ceil(batch / 8)` units,
+ * which is only correct for coal — fuelling a 30-iron batch with 4 planks burns out
+ * after 6 ingots and the smelt reports a partial result, which then un-does the iron
+ * rung. Planks and logs are 1.5 items each, sticks half an item.
+ */
+const FUEL_YIELD = { coal: 8, charcoal: 8, coal_block: 80, blaze_rod: 12, dried_kelp_block: 20, stick: 0.5, bamboo: 0.25 };
+const fuelYield = (name) => FUEL_YIELD[name] ?? (/_planks$|_log$|_wood$/.test(name) ? 1.5 : 1);
+
+/** Total of a named item across every slot, not just the first stack. */
+const countAllSlots = (bot, name) => bot.inventory.items().reduce((n, i) => (i.name === name ? n + i.count : n), 0);
+
+/**
+ * Pick the fuel that can actually finish the batch, preferring proper fuels over
+ * burning the planks she needs for crafting.
+ */
+function chooseFuel(bot, batch) {
+  const owned = FUELS.map((name) => {
+    const have = countAllSlots(bot, name);
+    if (!have) return null;
+    const per = fuelYield(name);
+    return { name, have, per, units: Math.max(1, Math.ceil(batch / per)), covers: have * per };
+  }).filter(Boolean);
+  if (!owned.length) return null;
+  // Anything that can cover the whole batch wins; otherwise take the biggest burn.
+  const enough = owned.filter((f) => f.covers >= batch);
+  const pick = (enough.length ? enough : owned.sort((a, b) => b.covers - a.covers))[0];
+  return { ...pick, units: Math.min(pick.have, pick.units) };
+}
+
 const count = (bot, name) => bot.inventory.items().reduce((n, i) => (i.name === name ? n + i.count : n), 0);
 const findItem = (bot, name) => bot.inventory.items().find((i) => i.name === name);
 
@@ -137,44 +169,51 @@ export async function ensureCraftingTable(bot, task) {
     table = null;
   }
 
-  // 4. The remembered camp bench — only if it is genuinely close and she has no
-  //    materials to make a new one.
+  // 4. Make one and put it down.
+  let item = findItem(bot, 'crafting_table');
+  if (!item) {
+    await ensurePlanks(bot, task, 4);
+    const id = bot.mcData.itemsByName.crafting_table.id;
+    const recipes = bot.recipesFor(id, null, 1, null);
+    if (recipes.length) {
+      try {
+        await bot.craft(recipes[0], 1, null);
+        item = findItem(bot, 'crafting_table');
+      } catch {}
+    }
+  }
+  if (item) {
+    const placed = await placeSupportBlock(bot, task, item);
+    if (placed) {
+      lastPlacedTable = placed.position.clone();
+      // Remember where camp is, so she can come back to this bench later.
+      mem.addWaypoint('bench', placed.position);
+      log.act(`bench set up at ${placed.position.x},${placed.position.y},${placed.position.z}`);
+      return placed;
+    }
+  }
+
+  /**
+   * 5. LAST RESORT: the bench she remembers placing.
+   *
+   * This used to be gated on `!canMakeOne`, so while she carried a single log she
+   * would never walk back to a perfectly good bench — she would try to place a new
+   * one, fail on the terrain, and report "no crafting table" forever. Reaching this
+   * point means placing has already failed, so distance is the only question left.
+   */
   const remembered = mem.all.waypoints?.bench;
-  const canMakeOne = plankCount(bot) >= 4 || logCount(bot) >= 1;
-  if (remembered && !canMakeOne) {
+  if (remembered) {
     const pos = new Vec3(remembered.x, remembered.y, remembered.z);
-    if (bot.entity.position.distanceTo(pos) <= 64) {
-      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 30000 });
+    if (bot.entity.position.distanceTo(pos) <= 96) {
+      log.act(`nowhere to place a bench here — walking back to the one at ${pos.x},${pos.y},${pos.z}`);
+      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 45000 });
       if (res.ok) {
         const found = bot.findBlock({ matching: TABLE_ID, maxDistance: 6 });
         if (found) return found;
       }
     }
   }
-
-  let item = findItem(bot, 'crafting_table');
-  if (!item) {
-    await ensurePlanks(bot, task, 4);
-    const id = bot.mcData.itemsByName.crafting_table.id;
-    const recipes = bot.recipesFor(id, null, 1, null);
-    if (!recipes.length) return null;
-    try {
-      await bot.craft(recipes[0], 1, null);
-      item = findItem(bot, 'crafting_table');
-    } catch {
-      return null;
-    }
-  }
-  if (!item) return null;
-
-  const placed = await placeSupportBlock(bot, task, item);
-  if (placed) {
-    lastPlacedTable = placed.position.clone();
-    // Remember where camp is, so she can come back to this bench later.
-    mem.addWaypoint('bench', placed.position);
-    log.act(`bench set up at ${placed.position.x},${placed.position.y},${placed.position.z}`);
-  }
-  return placed;
+  return null;
 }
 
 /**
@@ -207,26 +246,104 @@ export async function reclaimCraftingTable(bot, task) {
   return false;
 }
 
-/** Place a block-item next to her on solid ground and return the placed block. */
+const FACES = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+
+/** Cheap blocks she is willing to spend to build herself somewhere to stand. */
+const FOOTING = ['dirt', 'cobblestone', 'stone', 'cobbled_deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'gravel', 'sand', 'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks'];
+
+/**
+ * Try to put `item` at exactly `target`, using ANY solid neighbour as the reference
+ * face rather than insisting on the floor. Returns the placed block or null.
+ */
+async function placeAtCell(bot, task, item, target) {
+  for (const face of FACES) {
+    task.check();
+    const ref = bot.blockAt(target.plus(face));
+    if (!ref || ref.boundingBox !== 'block') continue;
+    if (/water|lava|bedrock/.test(ref.name)) continue;
+    try {
+      const held = bot.inventory.items().find((i) => i.name === item.name);
+      if (!held) return null;
+      if (bot.heldItem?.name !== held.name) await bot.equip(held, 'hand');
+      await bot.lookAt(target.offset(0.5, 0.5, 0.5), true);
+      await bot.placeBlock(ref, face.scaled(-1));
+      await wait(180); // let the server confirm before believing it
+      const now = bot.blockAt(target);
+      if (now && now.name === item.name) return now;
+    } catch (err) {
+      if (task.aborted) throw new AbortError();
+    }
+  }
+  return null;
+}
+
+/**
+ * Put a block-item down somewhere she can reach, and return the placed block.
+ *
+ * THE ONE THAT BLOCKED THE ENTIRE LADDER.
+ *
+ * The old version tried six cells at exactly foot level and demanded each be air
+ * sitting on a solid floor. On a steep mountain spawn every single candidate failed, so
+ * ensureCraftingTable returned null and `craft` reported "wooden_pickaxe needs a
+ * crafting table and she has none" while she was carrying one. No bench meant no wooden
+ * pickaxe, which meant no stone, no iron, nothing — 13 minutes of a live run spent
+ * failing to place a block she owned.
+ *
+ * So this escalates instead of giving up:
+ *   1. air cells all around her, at foot level and a step up or down
+ *   2. any solid neighbour as the reference face, not only the floor
+ *   3. build her own footing from a spare block when a cell is floating in space
+ *   4. dig a pocket out of the hillside when she is genuinely boxed in
+ */
 async function placeSupportBlock(bot, task, item) {
   const base = bot.entity.position.floored();
-  const spots = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(1, 0, 1), new Vec3(-1, 0, -1)];
-  for (const off of spots) {
-    task.check();
-    const target = base.plus(off);
-    const at = bot.blockAt(target);
-    const floor = bot.blockAt(target.offset(0, -1, 0));
-    const head = bot.blockAt(target.offset(0, 1, 0));
-    if (!at || !floor || !head) continue;
-    if (at.boundingBox !== 'empty' || floor.boundingBox !== 'block') continue;
-    try {
-      await bot.equip(item, 'hand');
-      await bot.lookAt(target.offset(0.5, 0.5, 0.5), true);
-      await bot.placeBlock(floor, new Vec3(0, 1, 0));
-      const b = bot.blockAt(target);
-      if (b && b.name === item.name) return b;
-    } catch {}
+  const ring = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]];
+  const cells = [];
+  for (const dy of [0, 1, -1]) for (const [dx, dz] of ring) cells.push(base.offset(dx, dy, dz));
+
+  const standable = (p) => !p.equals(base) && !p.equals(base.offset(0, 1, 0));
+  const isAir = (p) => {
+    const b = bot.blockAt(p);
+    return b && b.boundingBox === 'empty' && !/water|lava/.test(b.name);
+  };
+  const reachable = (p) => bot.entity.position.distanceTo(p) <= 4.4;
+
+  // 1 + 2. Somewhere already suitable.
+  for (const cell of cells) {
+    if (!standable(cell) || !isAir(cell) || !reachable(cell)) continue;
+    const placed = await placeAtCell(bot, task, item, cell);
+    if (placed) return placed;
   }
+
+  // 3. Nothing had a face to place against — give a cell a floor of its own first.
+  const footing = findAny(bot, FOOTING);
+  if (footing && footing.name !== item.name) {
+    for (const cell of cells) {
+      if (!standable(cell) || !isAir(cell) || !reachable(cell)) continue;
+      const under = cell.offset(0, -1, 0);
+      if (!isAir(under)) continue;
+      const madeFloor = await placeAtCell(bot, task, footing, under);
+      if (!madeFloor) continue;
+      log.debug(`built footing at ${under.x},${under.y},${under.z} to stand a ${item.name} on`);
+      const placed = await placeAtCell(bot, task, item, cell);
+      if (placed) return placed;
+    }
+  }
+
+  // 4. Walled in. Carve a pocket at chest height and use that.
+  const { digBlock } = await import('./gather.js');
+  for (const cell of cells.slice(0, 12)) {
+    if (!standable(cell) || !reachable(cell)) continue;
+    const b = bot.blockAt(cell);
+    if (!b || b.boundingBox !== 'block') continue;
+    if (/bedrock|water|lava|chest|furnace|crafting_table|bed|spawner/.test(b.name)) continue;
+    if (!(await digBlock(bot, task, b, { harvest: false }))) continue;
+    log.debug(`dug a pocket at ${cell.x},${cell.y},${cell.z} to place a ${item.name}`);
+    const placed = await placeAtCell(bot, task, item, cell);
+    if (placed) return placed;
+  }
+
+  log.warn(`could not find anywhere to place a ${item.name} at ${base.x},${base.y},${base.z}`);
   return null;
 }
 
@@ -259,11 +376,13 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
   // Common prerequisites first.
   if (/planks$/.test(name)) await ensurePlanks(bot, task, want);
   if (/_pickaxe|_sword|_axe|_shovel|_hoe|torch|bow|ladder|sign|arrow|rail/.test(name)) {
-    await ensureSticks(bot, task, 2);
+    // Scaled by the requested count. Reserving materials for one and then asking for
+    // two is what produced "missing ingredient" with a pack full of logs.
+    await ensureSticks(bot, task, 2 * want);
     // Wooden and stone tools also need planks or cobble for the head. Only sticks
     // were being reserved, so she would craft one tool and then be a plank short of
     // the next one with logs still in her pack.
-    if (/^wooden_/.test(name)) await ensurePlanks(bot, task, 4);
+    if (/^wooden_/.test(name)) await ensurePlanks(bot, task, 4 * want);
   }
   if (/table|chest|door|boat|stairs|slab|fence|bowl|bucket|shield|barrel/.test(name)) await ensurePlanks(bot, task, 6);
 
@@ -367,20 +486,42 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
     await goTo(bot, task, table.position.x, table.position.y, table.position.z, { range: 2 });
   }
 
-  // Walk the candidate list rather than betting everything on the first entry.
+  /**
+   * Craft ONE AT A TIME, re-checking materials between each.
+   *
+   * `recipesFor(..., minResultCount = 1, ...)` only promises she can make a single one,
+   * but the old code computed `times` from the requested count and passed it straight to
+   * bot.craft — so asking for two wooden pickaxes threw "missing ingredient" even with
+   * thirty logs in her pack, because six planks had never been prepared. That failure
+   * then triggered a wood repair, and a live run spent five and a half minutes chopping
+   * trees it did not need, three times over.
+   *
+   * Crafting in single units also means a partial result is kept rather than lost.
+   */
   let lastErr = null;
   for (const recipe of recipes) {
     task.check();
     const per = recipe.result?.count || 1;
-    const times = Math.max(1, Math.ceil((want - count(bot, name)) / per));
-    try {
-      await bot.craft(recipe, times, table || undefined);
-      mem.bump('itemsCrafted', times * per);
-      log.act(`crafted ${times * per}x ${name}`);
-      return { ok: true, detail: `crafted ${times * per}x ${name}` };
-    } catch (err) {
-      if (task.aborted) throw new AbortError();
-      lastErr = err;
+    let made = 0;
+
+    while (count(bot, name) < want) {
+      task.check();
+      try {
+        await bot.craft(recipe, 1, table || undefined);
+        made += per;
+        await wait(120); // let the inventory update land before the next check
+      } catch (err) {
+        if (task.aborted) throw new AbortError();
+        lastErr = err;
+        break;
+      }
+    }
+
+    if (made > 0) {
+      mem.bump('itemsCrafted', made);
+      const have = count(bot, name);
+      log.act(`crafted ${made}x ${name}${have < want ? ` (wanted ${want}, materials ran out)` : ''}`);
+      return { ok: true, detail: `crafted ${made}x ${name}`, got: made };
     }
   }
   return { ok: !!optional, reason: `craft ${name} failed: ${lastErr?.message || 'no usable recipe'}` };
@@ -422,8 +563,7 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
   const input = findAny(bot, inputs);
   if (!input) return { ok: false, reason: `no ${inputs[0]} to smelt` };
 
-  const fuel = findAny(bot, FUELS);
-  if (!fuel) return { ok: false, reason: 'no fuel for the furnace' };
+  if (!chooseFuel(bot, 1)) return { ok: false, reason: 'no fuel for the furnace' };
 
   const block = await ensureFurnace(bot, task);
   if (!block) return { ok: false, reason: 'no furnace available' };
@@ -435,14 +575,20 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
     return { ok: false, reason: `cannot open furnace: ${err.message}` };
   }
 
-  const batch = Math.min(want, input.count, 32);
+  // Count the input across every slot — a 33-iron batch can arrive as two stacks.
+  const available = inputs.reduce((n, name) => n + countAllSlots(bot, name), 0);
+  const batch = Math.min(want, available, 64);
   let produced = 0;
   try {
-    await furnace.putFuel(fuel.type, null, Math.max(1, Math.ceil(batch / 8))).catch(() => {});
+    const fuel = chooseFuel(bot, batch);
+    if (!fuel) return { ok: false, reason: 'no fuel for the furnace' };
+    const fuelItem = findItem(bot, fuel.name);
+    await furnace.putFuel(fuelItem.type, null, fuel.units).catch(() => {});
     await furnace.putInput(input.type, null, batch);
-    log.act(`smelting ${batch}x ${input.name} -> ${outName}`);
+    log.act(`smelting ${batch}x ${input.name} -> ${outName} (${fuel.units}x ${fuel.name} as fuel)`);
 
-    const deadline = Date.now() + batch * 11000 + 15000;
+    const deadline = Date.now() + batch * 12000 + 20000;
+    let lastBeat = Date.now();
     while (Date.now() < deadline) {
       task.check();
       await wait(1200);
@@ -452,6 +598,31 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
         if (taken) produced += taken.count;
         if (produced >= batch) break;
       }
+
+      /**
+       * Top the fuel back up mid-burn instead of stopping short.
+       *
+       * A 33-iron batch needs 5 coal; if she only had 2 in the furnace the old loop
+       * saw an empty fuel slot, broke out with 16 ingots, and the iron rung un-did
+       * itself. Refuelling while there is still input is what a player does.
+       */
+      if (!furnace.fuel && furnace.inputItem() && produced < batch) {
+        const more = chooseFuel(bot, batch - produced);
+        const moreItem = more && findItem(bot, more.name);
+        if (moreItem) {
+          await furnace.putFuel(moreItem.type, null, more.units).catch(() => {});
+          log.debug(`refuelled the furnace with ${more.units}x ${more.name}`);
+        } else {
+          log.warn(`out of fuel after ${produced}/${batch} ${outName}`);
+          break;
+        }
+      }
+
+      if (Date.now() - lastBeat > 15000) {
+        lastBeat = Date.now();
+        log.act(`[smelt] ${produced}/${batch} ${outName} | hp ${Math.round(bot.health)} | food ${bot.food}`);
+      }
+
       if (!furnace.inputItem() && !furnace.fuel) {
         const out2 = furnace.outputItem();
         if (out2) {

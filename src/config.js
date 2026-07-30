@@ -55,6 +55,14 @@ export const config = {
   ladder: {
     onSpawn: bool(process.env.LADDER_ON_SPAWN, true),
     ironY: num(process.env.IRON_Y, 16),
+    /**
+     * How far to look for ore before resorting to blind tunnelling.
+     *
+     * The server streams her every block in the loaded chunks, so searching a wide radius
+     * and walking to a real seam is both much faster and much safer than digging on spec.
+     * A whole live run came back with zero ore from hundreds of blocks of straight tunnel.
+     */
+    oreScan: num(process.env.ORE_SCAN_RADIUS, 64),
     diamondY: num(process.env.DIAMOND_Y, -54),
     homeInvFull: num(process.env.HOME_INV_FULL, 0.85),
     homeHp: num(process.env.HOME_HP, 8),

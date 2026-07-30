@@ -38,8 +38,17 @@ export function installMovement(bot) {
    */
   m.allowParkour = true;
   m.allowSprinting = true;
-  if ('maxParkourJump' in m) m.maxParkourJump = 4;
-  if ('parkourCost' in m) m.parkourCost = 1; // stop treating jumps as expensive
+  /**
+   * Two blocks, not four.
+   *
+   * A 4-block parkour jump is a coin flip, and on a mountain spawn a missed jump is not
+   * a stumble — it is a 30-block drop. A live run died twice in ninety seconds on a
+   * cliff world ("Trisha fell from a high place", then "doomed to fall by Skeleton")
+   * while pathing to trees below her. A 2-block hop still takes the direct routes a
+   * walking bot cannot, without betting her life on the landing.
+   */
+  if ('maxParkourJump' in m) m.maxParkourJump = 2;
+  if ('parkourCost' in m) m.parkourCost = 2;
 
   // Never take fall damage on purpose. Parkour is fine; falling is not.
   m.maxDropDown = 3;
@@ -117,6 +126,20 @@ export async function goTo(bot, task, x, y, z, { range = 1, timeoutMs = 90000, s
     return { ok: true };
   } catch (err) {
     if (task.aborted) throw new AbortError(task.reason);
+    /**
+     * If the budget is already spent, the retry is theatre.
+     *
+     * The watchdog above is still firing every 200ms once the deadline passes, so the
+     * looser second attempt was cancelled the instant it started and reported "The goal
+     * was changed before it could be completed!". That message then surfaced as the
+     * failure reason, which sent me hunting for a phantom goal-thief when the real
+     * problem was simply that 25 seconds was not enough to reach a tree down a slope.
+     */
+    const spent = Date.now() - started;
+    if (spent >= timeoutMs) {
+      return { ok: false, timedOut: true, reason: `could not reach ${Math.round(x)},${Math.round(y)},${Math.round(z)} within ${Math.round(timeoutMs / 1000)}s` };
+    }
+
     if (/Took too long|No path|Timeout|goal/i.test(err.message || '')) {
       // Try again, less fussy about exactly where she ends up.
       try {
@@ -243,11 +266,20 @@ export async function flee(bot, task, { from, distance = 20 } = {}) {
   }
   const dest = me.plus(away);
   log.act(`fleeing to ${Math.round(dest.x)},${Math.round(dest.z)}`);
+  /**
+   * Flee CAREFULLY. Panic is not a licence to run off a cliff — a live run fled a
+   * creeper straight down a mountainside, losing 17 blocks of altitude in six seconds,
+   * and was dead of fall damage a minute later. Safe movements refuse big drops.
+   */
+  bot.pathfinder.setMovements(bot.safeMovements);
   try {
     await bot.pathfinder.goto(new GoalXZ(Math.round(dest.x), Math.round(dest.z)));
     return { ok: true };
   } catch (err) {
+    if (task.aborted) throw new AbortError(task.reason);
     return { ok: false, reason: err.message };
+  } finally {
+    bot.pathfinder.setMovements(bot.movements);
   }
 }
 
@@ -259,13 +291,40 @@ export async function flee(bot, task, { from, distance = 20 } = {}) {
  * samples several candidate directions and rejects any that head into a large body of
  * water, preferring the one with the most solid ground along the way.
  */
-export async function explore(bot, task, { radius = 80 } = {}) {
+/**
+ * Coarse 32-block cells she has already searched.
+ *
+ * "Search elsewhere" has to mean elsewhere. She re-checked the same forty blocks five
+ * times in a row while starving, and six consecutive `explore` calls in one session all
+ * covered ground she had just walked. Remembering where she has been is what turns
+ * aimless wandering into an actual search.
+ */
+const visitedCells = new Map();
+const cellKey = (x, z) => `${Math.floor(x / 32)},${Math.floor(z / 32)}`;
+const VISIT_TTL = 600000;
+
+function markVisited(pos) {
+  const now = Date.now();
+  visitedCells.set(cellKey(pos.x, pos.z), now);
+  if (visitedCells.size > 512) {
+    for (const [k, t] of visitedCells) if (now - t > VISIT_TTL) visitedCells.delete(k);
+  }
+}
+
+const visitedRecently = (x, z) => {
+  const t = visitedCells.get(cellKey(x, z));
+  return !!t && Date.now() - t < VISIT_TTL;
+};
+
+export async function explore(bot, task, { radius = 80, reason = 'looking for new ground', timeoutMs = 75000 } = {}) {
   const start = bot.entity.position.clone();
   const waterId = bot.mcData.blocksByName.water?.id;
+  markVisited(start);
 
   const scoreBearing = (angle) => {
     let land = 0;
     let water = 0;
+    let seen = 0;
     for (let step = 8; step <= Math.min(radius, 64); step += 8) {
       const p = start.offset(Math.cos(angle) * step, 0, Math.sin(angle) * step).floored();
       // Look down a little for the surface at that column.
@@ -284,8 +343,10 @@ export async function explore(bot, task, { radius = 80 } = {}) {
       }
       if (found && /water/.test(found.name)) water++;
       else if (found) land++;
+      if (visitedRecently(p.x, p.z)) seen++;
     }
-    return { land, water, score: land - water * 3 };
+    // Already-searched ground is worth far less than genuinely new terrain.
+    return { land, water, seen, score: land - water * 3 - seen * 2 };
   };
 
   let best = null;
@@ -301,17 +362,75 @@ export async function explore(bot, task, { radius = 80 } = {}) {
   }
 
   const dest = start.offset(Math.cos(best.angle) * radius, 0, Math.sin(best.angle) * radius);
-  log.act(`exploring toward ${Math.round(dest.x)},${Math.round(dest.z)} (land ${best.land}, water ${best.water})`);
+  log.act(
+    `exploring toward ${Math.round(dest.x)},${Math.round(dest.z)} — ${reason} (land ${best.land}, water ${best.water}, already-seen ${best.seen ?? 0})`,
+  );
+
+  /**
+   * BOUNDED, AND CANCELLABLE.
+   *
+   * This used to call pathfinder.goto with no timeout and no abort watch, so an
+   * exploration toward unreachable terrain ran until something else happened to cancel
+   * it — and an aborted explore kept walking because nothing stopped the goal. Walking
+   * forever is not a search.
+   */
+  const started = Date.now();
+  const watchdog = setInterval(() => {
+    if (task.aborted || Date.now() - started > timeoutMs) stop(bot);
+  }, 250);
+
   try {
     await bot.pathfinder.goto(new GoalXZ(Math.round(dest.x), Math.round(dest.z)));
-    return { ok: true, detail: `explored ${radius} blocks` };
+    const moved = bot.entity.position.distanceTo(start);
+    markVisited(bot.entity.position);
+    task.beat();
+    return { ok: moved > 8, detail: `explored ${Math.round(moved)}m`, reason: moved > 8 ? undefined : 'could not get anywhere new' };
   } catch (err) {
-    if (task.aborted) throw new AbortError();
-    return { ok: false, reason: err.message };
+    if (task.aborted) throw new AbortError(task.reason);
+    const moved = bot.entity.position.distanceTo(start);
+    markVisited(bot.entity.position);
+    // Partial progress still counts: she is somewhere new, which was the point.
+    if (moved > 12) return { ok: true, detail: `explored ${Math.round(moved)}m (path cut short)` };
+    return { ok: false, reason: `could not explore: ${err.message}` };
+  } finally {
+    clearInterval(watchdog);
+    stop(bot);
   }
 }
 
 /** Descend to a target Y with a safe staircase rather than a suicide shaft. */
+/**
+ * Get back up to daylight.
+ *
+ * Needed because a rung can legitimately send her to the surface while she is deep in a
+ * mine — a live run had her looping `chopWood` at Y=11 for five minutes, because there
+ * are no trees fifty blocks underground and "search sideways" can never find one.
+ * Pathfinder can dig and tower, so a plain Y goal is enough.
+ */
+export async function ascendToSurface(bot, task, { targetY = 62, timeoutMs = 90000 } = {}) {
+  const startY = bot.entity.position.y;
+  if (startY >= targetY - 2) return { ok: true, detail: 'already at the surface' };
+  log.act(`surfacing from Y=${Math.round(startY)} to Y=${targetY}`);
+
+  const started = Date.now();
+  const watchdog = setInterval(() => {
+    if (task.aborted || Date.now() - started > timeoutMs) stop(bot);
+  }, 250);
+  try {
+    await bot.pathfinder.goto(new GoalY(targetY));
+    return { ok: true, detail: `surfaced to Y=${Math.round(bot.entity.position.y)}` };
+  } catch (err) {
+    if (task.aborted) throw new AbortError(task.reason);
+    const gained = bot.entity.position.y - startY;
+    return gained > 6
+      ? { ok: true, detail: `climbed ${Math.round(gained)} blocks` }
+      : { ok: false, reason: `could not surface: ${err.message}` };
+  } finally {
+    clearInterval(watchdog);
+    stop(bot);
+  }
+}
+
 export async function descendTo(bot, task, targetY, { safe = true } = {}) {
   const { digDown } = await import('./gather.js');
   return digDown(bot, task, { toY: targetY, staircase: safe });
