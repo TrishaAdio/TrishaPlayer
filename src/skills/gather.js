@@ -57,6 +57,37 @@ export function expandBlockNames(bot, name) {
 
 const idsFor = (bot, names) => names.map((n) => bot.mcData.blocksByName[n]?.id).filter((x) => x != null);
 
+const countItem = (bot, name) => bot.inventory.items().reduce((n, i) => (i.name === name ? n + i.count : n), 0);
+
+/**
+ * Keep a working pickaxe in her pack.
+ *
+ * A stone pickaxe lasts 131 blocks; a real branch-mining trip is several hundred. So
+ * running dry underground is the normal case, not the exception — and the old code
+ * simply abandoned the objective ("pickaxe dying"), which stranded the iron rung
+ * permanently because the retry had no pickaxe either. She is standing in an unlimited
+ * supply of cobblestone: the answer is to make another one where she stands.
+ */
+export async function ensurePickaxe(bot, task) {
+  const healthy = bot.inventory.items().filter((i) => /_pickaxe$/.test(i.name) && !toolNearlyBroken(bot, i));
+  if (healthy.length) {
+    // Make sure the healthy one is the one in her hand.
+    if (toolNearlyBroken(bot)) await bot.equip(healthy[0], 'hand').catch(() => {});
+    return true;
+  }
+  const tier = countItem(bot, 'cobblestone') >= 3 ? 'stone_pickaxe' : 'wooden_pickaxe';
+  log.act(`[tools] pickaxe nearly spent — making a fresh ${tier} on the spot`);
+  const { craft } = await import('./craft.js');
+  const made = await craft(bot, task, { item: tier, count: 1, optional: true });
+  if (made.ok) {
+    const fresh = bot.inventory.items().find((i) => i.name === tier);
+    if (fresh) await bot.equip(fresh, 'hand').catch(() => {});
+    return true;
+  }
+  log.warn(`[tools] could not replace the pickaxe: ${made.reason || 'no materials'}`);
+  return false;
+}
+
 export function inventoryFull(bot) {
   const slots = bot.inventory.slots.slice(9, 45);
   const used = slots.filter(Boolean).length;
@@ -322,12 +353,14 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
     }
     if (now - lastReportAt > 15000) {
       lastReportAt = now;
-      log.act(`still mining: ${got}/${count} ${names[0]}`);
+      const p = bot.entity.position;
+      log.act(
+        `[mine] ${got}/${count} ${names[0]} | at ${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} | hp ${Math.round(bot.health)} | food ${bot.food} | misses ${misses}`,
+      );
     }
     task.check();
-    if (toolNearlyBroken(bot)) {
-      const spare = bestPickaxe(bot);
-      if (!spare || toolNearlyBroken(bot, spare)) return { ok: got > 0, detail: `got ${got}, tool about to break`, got };
+    if (toolNearlyBroken(bot) && !(await ensurePickaxe(bot, task))) {
+      return { ok: got > 0, detail: `got ${got}, out of pickaxes`, got, needsTool: 'stone_pickaxe' };
     }
     if (inventoryFull(bot) > 0.95) return { ok: true, detail: `got ${got}, inventory full`, got };
 
@@ -379,6 +412,7 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
         got += veined;
         progressed = true;
         lastProgressAt = Date.now();
+        task.beat(`${got}/${count} ${names[0]} | vein of ${veined} at ${pos.x},${pos.y},${pos.z} | hp ${Math.round(bot.health)} | food ${bot.food}`);
       }
     }
     if (!progressed) misses++;
@@ -388,49 +422,166 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
   return { ok: got > 0 || optional, detail: `mined ${got}x ${names[0]}`, got };
 }
 
-/** Chop whole trees, trunk and all, and replant if she has saplings. */
+/**
+ * Is this a log she can plausibly stand next to and cut?
+ *
+ * findBlocks will happily hand back canopy logs twenty blocks up a cliff and logs
+ * buried inside a hillside. Preferring the bottom of a trunk keeps her cutting from the
+ * ground, which is both reachable and drops the rest of the tree within pickup range.
+ */
+function isTrunkBase(bot, pos) {
+  const below = bot.blockAt(pos.offset(0, -1, 0));
+  if (!below) return false;
+  if (LOG_TYPES.includes(below.name)) return false; // not the bottom of the trunk
+  // A log sealed inside terrain cannot be reached, however close it looks.
+  for (const off of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+    const n = bot.blockAt(pos.offset(off[0], off[1], off[2]));
+    if (n && n.boundingBox === 'empty') return true;
+  }
+  return false;
+}
+
+/**
+ * Fell one tree by flood-filling its connected log blocks.
+ *
+ * The old code walked straight up from the first log and stopped at the first gap, so
+ * every branch and every leaning or 2x2 trunk was left standing. Trees are not columns.
+ */
+async function fellTree(bot, task, start, max = 12) {
+  const queue = [start];
+  const seen = new Set();
+  let felled = 0;
+
+  while (queue.length && felled < max) {
+    task.check();
+    const pos = queue.shift();
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const b = bot.blockAt(pos);
+    if (!b || !LOG_TYPES.includes(b.name)) continue;
+    if (isBlacklisted(pos)) continue;
+
+    if (bot.entity.position.distanceTo(pos) > 4.2) {
+      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 12000 });
+      if (!res.ok) continue;
+    }
+    if (await digBlock(bot, task, b)) {
+      felled++;
+      task.beat();
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dz = -1; dz <= 1; dz++) {
+            if (!dx && !dy && !dz) continue;
+            queue.push(pos.offset(dx, dy, dz));
+          }
+    }
+  }
+  return felled;
+}
+
+/**
+ * Chop trees and come back with LOGS IN HER PACK.
+ *
+ * THE REPORTED FAILURE. The old version incremented a counter every time `bot.dig`
+ * resolved and returned "chopped 8 logs" whether or not a single log ever reached her
+ * inventory. The wood rung counts inventory, so it stayed unsatisfied, the ladder asked
+ * again, and she went off to break eight more blocks she would also never pick up —
+ * which from outside is exactly "she cannot even collect wood reliably".
+ *
+ * Success is now defined by inventory gain, and nothing else.
+ */
 export async function chopWood(bot, task, { count = 8 } = {}) {
   const ids = idsFor(bot, LOG_TYPES);
-  let got = 0;
-  let misses = 0;
-  log.act(`chopping ${count} logs`);
+  const owned = () => LOG_TYPES.reduce((n, name) => n + countItem(bot, name), 0);
+  const startOwned = owned();
+  const want = startOwned + Math.max(1, count);
 
-  while (got < count && misses < 5) {
+  log.act(`chopping for ${count} logs (has ${startOwned})`);
+
+  let misses = 0;
+  let explores = 0;
+  let broke = 0;
+  let radius = 48;
+  const MAX_EXPLORES = 3;
+  const HARD_LIMIT_MS = 240000;
+  const startedAt = Date.now();
+  const gained = () => owned() - startOwned;
+
+  while (owned() < want && misses < 6) {
     task.check();
-    const positions = bot.findBlocks({ matching: ids, maxDistance: 96, count: 8 });
+    if (Date.now() - startedAt > HARD_LIMIT_MS) {
+      return { ok: gained() > 0, got: gained(), detail: `chopped ${gained()} logs (time limit)` };
+    }
+
+    const positions = bot
+      .findBlocks({ matching: ids, maxDistance: radius, count: 24 })
+      .filter((p) => !isBlacklisted(p) && isTrunkBase(bot, p));
+
     if (!positions.length) {
       misses++;
+      if (explores >= MAX_EXPLORES) {
+        return {
+          ok: gained() > 0,
+          got: gained(),
+          detail: `chopped ${gained()} logs`,
+          reason: `no reachable tree trunk within ${radius}m after ${explores} moves`,
+        };
+      }
+      explores++;
+      radius = Math.min(112, radius + 24);
+      log.act(`[chopWood] no reachable trunk in range — moving to new ground (${explores}/${MAX_EXPLORES}), widening search to ${radius}m`);
       const { explore } = await import('./move.js');
-      await explore(bot, task, { radius: 48 }).catch(() => {});
+      await explore(bot, task, { radius: 64 }).catch(() => {});
       continue;
     }
 
+    let progressed = false;
     for (const pos of positions) {
       task.check();
-      if (got >= count) break;
-      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 30000 });
-      if (!res.ok) {
-        misses++;
-        continue;
-      }
-      // Walk up the trunk.
-      for (let dy = 0; dy < 14; dy++) {
-        task.check();
-        const b = bot.blockAt(pos.offset(0, dy, 0));
-        if (!b || !LOG_TYPES.includes(b.name)) break;
-        if (bot.entity.position.distanceTo(b.position) > 4.2) {
-          const near = await goTo(bot, task, b.position.x, b.position.y, b.position.z, { range: 2, timeoutMs: 15000 });
-          if (!near.ok) break;
+      if (owned() >= want) break;
+
+      const trunk = bot.blockAt(pos);
+      if (!trunk || !LOG_TYPES.includes(trunk.name)) continue;
+      const before = owned();
+      const dist = bot.entity.position.distanceTo(pos);
+
+      task.beat(
+        `${gained()}/${count} logs | target ${trunk.name} at ${pos.x},${pos.y},${pos.z} | distance ${Math.round(dist)}m | hp ${Math.round(bot.health)} | food ${bot.food}`,
+      );
+
+      if (dist > 4.0) {
+        const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 25000 });
+        if (!res.ok) {
+          log.debug(`[chopWood] cannot reach trunk at ${pos.x},${pos.y},${pos.z} (${res.reason}) — blacklisted 3m`);
+          blacklist(pos, 180000);
+          misses++;
+          continue;
         }
-        if (await digBlock(bot, task, b)) got++;
-        if (got >= count + 2) break;
       }
+
+      const felled = await fellTree(bot, task, pos, want - owned() + 3);
+      broke += felled;
+      // The drops are the entire point of the exercise.
+      await collectDrops(bot, task, { radius: 12, quiet: true });
+      const got = owned() - before;
+      if (got > 0) progressed = true;
+      log.act(`[chopWood] felled ${felled} blocks at ${pos.x},${pos.y},${pos.z}, +${got} logs in pack (${gained()}/${count})`);
+      // Broke blocks but gained nothing, or could not break any: stop returning here.
+      if (felled === 0 || got === 0) blacklist(pos, 120000);
     }
-    await collectDrops(bot, task, { radius: 10, quiet: true });
+    if (!progressed) misses++;
   }
 
   await plantSapling(bot, task).catch(() => {});
-  return { ok: got > 0, detail: `chopped ${got} logs`, got };
+  const got = gained();
+  return {
+    ok: got > 0,
+    got,
+    detail: `chopped ${got} logs (${broke} blocks broken)`,
+    reason: got === 0 ? 'broke logs but none reached the pack' : undefined,
+  };
 }
 
 async function plantSapling(bot, task) {
@@ -450,24 +601,60 @@ async function plantSapling(bot, task) {
   }
 }
 
-/** Walk over nearby dropped items so nothing is left behind. */
-export async function collectDrops(bot, task, { radius = 12, quiet = false } = {}) {
-  // Note: entity.objectType is deprecated in prismarine-entity and spams stack
-  // traces on access. Match on name only.
-  const drops = Object.values(bot.entities).filter(
-    (e) => e && (e.name === 'item' || e.name === 'item_stack' || e.name === 'Item') && e.position && bot.entity.position.distanceTo(e.position) <= radius,
-  );
-  if (!drops.length) return { ok: true, detail: 'nothing to pick up' };
-  if (!quiet) log.act(`collecting ${drops.length} drops`);
+/**
+ * Dropped item entities near her.
+ *
+ * Matched on name AND on the registry's numeric entity type. `entity.objectType` is
+ * deprecated in prismarine-entity and spams stack traces on access, so it is never
+ * touched; the numeric type is the stable way to ask the question across versions.
+ */
+function droppedItems(bot, radius) {
+  const itemType = bot.registry?.entitiesByName?.item?.id ?? bot.mcData?.entitiesByName?.item?.id;
+  const me = bot.entity.position;
+  return Object.values(bot.entities).filter((e) => {
+    if (!e || !e.position) return false;
+    const isItem = e.name === 'item' || e.name === 'item_stack' || (itemType != null && e.entityType === itemType);
+    return isItem && me.distanceTo(e.position) <= radius;
+  });
+}
 
-  let picked = 0;
+/**
+ * Walk over nearby dropped items so nothing is left behind.
+ *
+ * Two fixes over the old version. It aimed at the drop with GoalNear range 0, which is
+ * an exact-block goal that frequently cannot be satisfied for an item resting on a slab
+ * or a slope — so the walk "failed" while she was standing right next to the item. And
+ * it reported how many goals it reached rather than what she actually picked up, so a
+ * chop that collected nothing still looked like a success.
+ */
+export async function collectDrops(bot, task, { radius = 12, quiet = false } = {}) {
+  const total = () => bot.inventory.items().reduce((n, i) => n + i.count, 0);
+  const before = total();
+
+  const drops = droppedItems(bot, radius);
+  if (!drops.length) return { ok: true, detail: 'nothing to pick up', got: 0 };
+  if (!quiet) log.act(`collecting ${drops.length} drops within ${radius}m`);
+
+  // Nearest first, so the pickup magnet sweeps up clusters along the way.
+  drops.sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+
+  let visited = 0;
   for (const d of drops.slice(0, 24)) {
     task.check();
-    if (!bot.entities[d.id]) continue;
-    const res = await goTo(bot, task, d.position.x, d.position.y, d.position.z, { range: 0, timeoutMs: 8000 });
-    if (res.ok) picked++;
+    if (!bot.entities[d.id]) continue; // the magnet already got it
+    const p = d.position;
+    const res = await goTo(bot, task, p.x, p.y, p.z, { range: 1, timeoutMs: 10000 });
+    visited++;
+    if (res.ok) {
+      // Pickup is a server-side sweep of roughly 1.5 blocks; give it a moment to fire.
+      await task.sleep(350);
+      task.beat();
+    }
   }
-  return { ok: true, detail: `picked up ${picked}`, got: picked };
+
+  const got = total() - before;
+  if (!quiet) log.act(`picked up ${got} items from ${visited} drops`);
+  return { ok: true, detail: `picked up ${got} items`, got };
 }
 
 /**
@@ -576,9 +763,8 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
     task.check();
 
     if (inventoryFull(bot) > 0.9) return { ok: true, detail: `${got} ${ore}, inventory full`, got };
-    if (toolNearlyBroken(bot)) {
-      const spare = bestPickaxe(bot);
-      if (!spare || toolNearlyBroken(bot, spare)) return { ok: got > 0, detail: `${got} ${ore}, pickaxe dying`, got };
+    if (toolNearlyBroken(bot) && !(await ensurePickaxe(bot, task))) {
+      return { ok: got > 0, detail: `${got} ${ore}, out of pickaxes`, got, needsTool: 'stone_pickaxe' };
     }
 
     // Look around for anything worth a detour.
@@ -591,7 +777,14 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
       const wanted = names.includes(b.name);
       const mined = await mineVein(bot, task, b, { max: 16 });
       if (mined && wanted) got += mined;
-      if (mined) log.act(`vein: ${mined}x ${b.name}`);
+      if (mined) {
+        const p = bot.entity.position;
+        task.beat(
+          `${got}/${count} ${ore} | vein of ${mined}x ${b.name} | at ${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} | hp ${Math.round(bot.health)} | food ${bot.food} | tunnel ${step}`,
+          { everyMs: 10000 },
+        );
+        log.debug(`vein: ${mined}x ${b.name}`);
+      }
       if (got >= count) break;
     }
     if (got >= count) break;
@@ -625,6 +818,12 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
       await task.sleep(300);
       bot.setControlState('forward', false);
     }
+    // Tunnelling forward IS progress even when no ore turns up, and the watchdog needs
+    // to know that or it cancels a perfectly good mining trip every 3 minutes.
+    task.beat(
+      `${got}/${count} ${ore} | tunnelling at Y=${Math.round(bot.entity.position.y)} step ${step}/${maxTunnel} | hp ${Math.round(bot.health)} | food ${bot.food}`,
+      { everyMs: 20000 },
+    );
     if (step % TORCH_EVERY === 0) await placeTorch(bot, task).catch(() => {});
   }
 

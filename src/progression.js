@@ -20,6 +20,75 @@ const countAny = (bot, ...names) => names.reduce((n, name) => n + count(bot, nam
 
 const has = (bot, name, n = 1) => count(bot, name) >= n;
 
+/**
+ * EVERY slot, including worn armour (5-8) and the off-hand (45).
+ *
+ * `bot.inventory.items()` only covers slots 9-44, so the moment she equipped something
+ * it vanished from these predicates. Two rungs un-did themselves because of it: the
+ * shield moved to the off-hand and `has(bot,'shield')` went false, so `iron_kit`
+ * re-ran forever, and armour she was wearing stopped counting as armour she owned.
+ * Anything that asks "does she own this" must look at the whole window.
+ */
+const ARMOUR_AND_OFFHAND = [5, 6, 7, 8, 45];
+
+const allSlots = (bot) => {
+  const inv = bot?.inventory;
+  if (!inv) return [];
+  const out = typeof inv.items === 'function' ? [...inv.items()] : [];
+  // Indexed by key rather than filtered, so this works whether `slots` is a real
+  // array from mineflayer or a sparse object from a test fixture.
+  const slots = inv.slots || {};
+  for (const i of ARMOUR_AND_OFFHAND) if (slots[i]) out.push(slots[i]);
+  return out;
+};
+const ownedCount = (bot, name) => allSlots(bot).reduce((n, it) => (it.name === name ? n + (it.count ?? 1) : n), 0);
+const owns = (bot, name, n = 1) => ownedCount(bot, name) >= n;
+
+/**
+ * Ingot cost of anything iron she might be holding or wearing.
+ *
+ * Used to make the iron rung MONOTONIC. The old predicate counted loose ingots only,
+ * so smelting and then crafting the armour spent them, the count fell back under the
+ * target, and the ladder sent her underground to mine iron she had already mined and
+ * was currently wearing. That is the "smelting part of the iron un-does the iron stage"
+ * oscillation, and counting invested iron is what kills it.
+ */
+const IRON_COST = {
+  raw_iron: 1, iron_ingot: 1, iron_block: 9,
+  iron_helmet: 5, iron_chestplate: 8, iron_leggings: 7, iron_boots: 4,
+  iron_pickaxe: 3, iron_sword: 2, iron_axe: 3, iron_shovel: 1, iron_hoe: 2,
+  shield: 1, bucket: 3, water_bucket: 3, lava_bucket: 3, powder_snow_bucket: 3,
+  shears: 2, flint_and_steel: 1, iron_door: 6, iron_trapdoor: 4, hopper: 5,
+  cauldron: 7, iron_bars: 1, chain: 1, tripwire_hook: 1, rail: 1,
+};
+
+export const ironBudget = (bot) =>
+  allSlots(bot).reduce((n, it) => n + (IRON_COST[it.name] || 0) * (it.count ?? 1), 0);
+
+/**
+ * The exact iron kit this project is judged on.
+ *   helmet 5 + chestplate 8 + leggings 7 + boots 4 + pickaxe 3 + sword 2 + shield 1 = 30
+ * plus 3 for the water bucket the next rung wants. The old target of 24 was short by
+ * a third and made the full set arithmetically impossible.
+ */
+export const IRON_FOR_KIT = 30;
+export const IRON_TARGET = IRON_FOR_KIT + 3;
+
+/**
+ * All four pieces worn, each one actually iron (or better) and in its own slot.
+ *
+ * Counting "four occupied armour slots" would happily accept a leather cap and three
+ * gold boots, so the slot and the material are both checked.
+ */
+const IRON_SET = { 5: 'iron_helmet', 6: 'iron_chestplate', 7: 'iron_leggings', 8: 'iron_boots' };
+export const wearingFullIron = (bot) =>
+  Object.entries(IRON_SET).every(([slot, name]) => {
+    const it = bot.inventory?.slots?.[Number(slot)];
+    if (!it) return false;
+    const kind = name.split('_')[1]; // helmet / chestplate / leggings / boots
+    return new RegExp(`^(iron|diamond|netherite)_${kind}$`).test(it.name);
+  });
+
 const LOGS = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'pale_oak_log'];
 const PLANKS = LOGS.map((l) => l.replace('_log', '_planks'));
 
@@ -35,20 +104,20 @@ export const foodCount = (bot) => countAny(bot, ...FOODS);
 export const rawMeatCount = (bot) => countAny(bot, ...RAW_MEAT);
 
 const pickTier = (bot) => {
-  if (has(bot, 'netherite_pickaxe')) return 5;
-  if (has(bot, 'diamond_pickaxe')) return 4;
-  if (has(bot, 'iron_pickaxe')) return 3;
-  if (has(bot, 'stone_pickaxe')) return 2;
-  if (has(bot, 'wooden_pickaxe') || has(bot, 'golden_pickaxe')) return 1;
+  if (owns(bot, 'netherite_pickaxe')) return 5;
+  if (owns(bot, 'diamond_pickaxe')) return 4;
+  if (owns(bot, 'iron_pickaxe')) return 3;
+  if (owns(bot, 'stone_pickaxe')) return 2;
+  if (owns(bot, 'wooden_pickaxe') || owns(bot, 'golden_pickaxe')) return 1;
   return 0;
 };
 
 const swordTier = (bot) => {
-  if (has(bot, 'netherite_sword')) return 5;
-  if (has(bot, 'diamond_sword')) return 4;
-  if (has(bot, 'iron_sword')) return 3;
-  if (has(bot, 'stone_sword')) return 2;
-  if (has(bot, 'wooden_sword')) return 1;
+  if (owns(bot, 'netherite_sword')) return 5;
+  if (owns(bot, 'diamond_sword')) return 4;
+  if (owns(bot, 'iron_sword')) return 3;
+  if (owns(bot, 'stone_sword')) return 2;
+  if (owns(bot, 'wooden_sword')) return 1;
   return 0;
 };
 
@@ -121,11 +190,22 @@ export const LADDER = [
   {
     id: 'wood_tools',
     label: 'crafting table, pickaxe and a sword',
-    done: (bot) => pickTier(bot) >= 1 && swordTier(bot) >= 1 && has(bot, 'crafting_table'),
+    /**
+     * A PLACED BENCH STILL COUNTS.
+     *
+     * Requiring one in her pack made this rung un-do itself every single time she put a
+     * bench down to craft at — observed live oscillating wood_tools -> stone ->
+     * stone_tools -> wood_tools, crafting a fresh table on every lap. Owning the
+     * capability is the point, not carrying the block.
+     */
+    done: (bot, ctx) =>
+      pickTier(bot) >= 1 && swordTier(bot) >= 1 && (owns(bot, 'crafting_table') || !!ctx.memory.all.waypoints?.bench),
     actions: () => [
       { name: 'craft', args: { item: 'crafting_table', count: 1 } },
       { name: 'craft', args: { item: 'stick', count: 8 } },
-      { name: 'craft', args: { item: 'wooden_pickaxe', count: 1 } },
+      // Two, for the same reason as the stone kit: one wooden pickaxe is 59 blocks and
+      // it broke mid-vein on a live run, taking the whole objective down with it.
+      { name: 'craft', args: { item: 'wooden_pickaxe', count: 2 } },
       // A sword this early is what stops her punching zombies. The old rung made a
       // pickaxe and an axe and left her with no weapon at all for the first night.
       { name: 'craft', args: { item: 'wooden_sword', count: 1 } },
@@ -136,15 +216,36 @@ export const LADDER = [
   {
     id: 'stone',
     label: 'mine cobblestone',
-    done: (bot) => count(bot, 'cobblestone') >= 22,
+    /**
+     * Monotonic, like the iron rung. Requiring 22 cobble unconditionally meant the
+     * stone kit — which spends 16 of them — immediately un-did this rung and sent her
+     * back to mine the same stone again. Owning the kit is proof the cobble was got.
+     */
+    done: (bot) => count(bot, 'cobblestone') >= 22 || (pickTier(bot) >= 2 && swordTier(bot) >= 2),
     actions: () => [{ name: 'mine', args: { block: 'stone', count: 26 } }],
   },
   {
     id: 'stone_tools',
     label: 'stone kit',
-    done: (bot) => pickTier(bot) >= 2 && swordTier(bot) >= 2 && has(bot, 'furnace'),
+    /**
+     * A PLACED FURNACE STILL COUNTS — and so does the cobble to build one.
+     *
+     * Same trap as the crafting bench: she places the furnace to smelt, it leaves her
+     * pack, and the rung un-does itself. What matters is that she CAN smelt, and eight
+     * cobblestone is a furnace whenever she wants one (ensureFurnace builds it on
+     * demand).
+     */
+    done: (bot) =>
+      pickTier(bot) >= 2 && swordTier(bot) >= 2 && (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8),
     actions: () => [
-      { name: 'craft', args: { item: 'stone_pickaxe', count: 1 } },
+      /**
+       * TWO pickaxes, deliberately.
+       *
+       * A live run crafted exactly one, it snapped partway through a stone vein, and
+       * every dig afterwards logged "a fist breaks it but drops nothing" — hundreds of
+       * times, with the whole ladder dead behind it. A spare costs three cobble.
+       */
+      { name: 'craft', args: { item: 'stone_pickaxe', count: 2 } },
       { name: 'craft', args: { item: 'stone_sword', count: 1 } },
       { name: 'craft', args: { item: 'stone_axe', count: 1 } },
       { name: 'craft', args: { item: 'stone_shovel', count: 1 } },
@@ -154,9 +255,16 @@ export const LADDER = [
   },
   {
     id: 'food_security',
-    label: 'stock cooked food',
-    // 8 cooked items is enough to survive a full mining trip.
-    done: (bot) => foodCount(bot) >= 8,
+    label: 'stock food for the mining trip',
+    /**
+     * Raw meat counts. The old rung demanded 8 COOKED items, which needs a furnace and
+     * fuel she may not have yet — and `forageFood` reported failure whenever it came
+     * back with raw meat only, so a live run spent 252 seconds here and returned
+     * "food: 0 cooked items" while carrying mutton. Optional so a barren area cannot
+     * wall the ladder; genuine starvation is a reflex-layer emergency anyway.
+     */
+    optional: true,
+    done: (bot) => foodCount(bot) >= 8 || foodCount(bot) + rawMeatCount(bot) >= 12,
     actions: () => [
       { name: 'forageFood', args: { target: 10 } },
       { name: 'smelt', args: { item: 'cooked_beef', count: 8, any: 'meat' } },
@@ -164,11 +272,18 @@ export const LADDER = [
   },
   {
     id: 'torches',
-    label: 'make torches',
-    done: (bot) => count(bot, 'torch') >= 24 || count(bot, 'coal') === 0,
+    label: 'coal and torches',
+    /**
+     * `|| count(coal) === 0` made this rung true the instant she spawned, so she was
+     * sent down to mine iron with no light at all — which is how most of the deaths
+     * happened. Now it is a real objective, but an optional one: no coal on the surface
+     * is normal, and branch mining picks coal up on the way down regardless.
+     */
+    optional: true,
+    done: (bot) => ownedCount(bot, 'torch') >= 16,
     actions: () => [
-      { name: 'mine', args: { block: 'coal_ore', count: 8, optional: true } },
-      { name: 'craft', args: { item: 'torch', count: 32 } },
+      { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true } },
+      { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
     ],
   },
   {
@@ -186,7 +301,13 @@ export const LADDER = [
      * be carrying — so she spent every night awake being shot at. Sheep first, then
      * the bed, then actually sleep in it.
      */
-    done: (bot, ctx) => !!ctx.memory.all.bed || has(bot, 'white_bed') || countAny(bot, ...BED_NAMES) > 0,
+    /**
+     * Optional. A biome with no sheep made this unsatisfiable, and because it sits
+     * before the iron rung it walled the entire ladder off — she retried getWool
+     * forever and never mined a single ore. A bed is a comfort, not a prerequisite.
+     */
+    optional: true,
+    done: (bot, ctx) => !!ctx.memory.all.bed || countAny(bot, ...BED_NAMES) > 0 || owns(bot, 'white_bed'),
     actions: () => [
       { name: 'getWool', args: { count: 3 } },
       { name: 'craft', args: { item: 'white_bed', count: 1, optional: true } },
@@ -195,18 +316,41 @@ export const LADDER = [
   },
   {
     id: 'iron',
-    label: 'find iron',
-    done: (bot) => countAny(bot, 'raw_iron', 'iron_ingot') >= 24 || armorTier(bot) >= 3,
+    label: `mine iron (${IRON_TARGET} ingots' worth)`,
+    /**
+     * Counted as a BUDGET, not as loose ingots — see ironBudget. This is what stops the
+     * rung un-doing itself as soon as smelting and crafting spend the ore.
+     */
+    /**
+     * Either she has mined the iron, or she is already standing there in gear that is
+     * iron-tier or better — someone handed her diamond, or she looted it. Requiring the
+     * ingots unconditionally would send a fully diamond-equipped bot back down the mine.
+     */
+    done: (bot) =>
+      ironBudget(bot) >= IRON_TARGET || (wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3),
+    /**
+     * Kit up BEFORE descending. A branch-mining trip outlasts several stone pickaxes,
+     * and replacing one at Y=16 needs a bench and sticks in her pack — without them the
+     * trip ended early with "pickaxe dying" and the retry had no pickaxe at all.
+     */
     actions: (bot, ctx) => [
-      { name: 'branchMine', args: { targetY: ctx.config.ironY, ore: 'iron_ore', count: 24 } },
+      { name: 'craft', args: { item: 'stone_pickaxe', count: 3, optional: true } },
+      { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
+      { name: 'craft', args: { item: 'crafting_table', count: 1, optional: true } },
+      { name: 'branchMine', args: { targetY: ctx.config.ironY, ore: 'iron_ore', count: IRON_TARGET + 3 } },
     ],
   },
   {
     id: 'iron_kit',
-    label: 'full iron armour, sword, shield',
-    done: (bot) => armorPieces(bot) === 4 && armorTier(bot) >= 3 && swordTier(bot) >= 3 && has(bot, 'shield'),
+    label: 'full iron armour, pickaxe, sword, shield',
+    /**
+     * The acceptance criteria, expressed exactly: four iron pieces actually WORN, an
+     * iron pickaxe, an iron sword, and a shield she owns (the shield lives in the
+     * off-hand, which `items()` does not report — hence `owns`).
+     */
+    done: (bot) => wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3 && owns(bot, 'shield'),
     actions: () => [
-      { name: 'smelt', args: { item: 'iron_ingot', count: 24 } },
+      { name: 'smelt', args: { item: 'iron_ingot', count: IRON_TARGET } },
       { name: 'craft', args: { item: 'iron_pickaxe', count: 1 } },
       { name: 'craft', args: { item: 'iron_sword', count: 1 } },
       { name: 'craft', args: { item: 'iron_helmet', count: 1 } },
@@ -220,7 +364,10 @@ export const LADDER = [
   {
     id: 'water_bucket',
     label: 'water bucket for lava and MLG saves',
-    done: (bot) => has(bot, 'water_bucket'),
+    // Optional: there is not always open water in reach, and she must not stall on it
+    // now that it sits directly after the iron kit.
+    optional: true,
+    done: (bot) => owns(bot, 'water_bucket'),
     actions: () => [
       { name: 'craft', args: { item: 'bucket', count: 1 } },
       { name: 'fillBucket', args: { fluid: 'water' } },
@@ -351,9 +498,16 @@ export const LADDER = [
   },
 ];
 
+/** Has this rung been parked as impossible in this world for now? */
+const isSkipped = (ctx, id) => {
+  const until = ctx?.skip?.get?.(id);
+  return !!until && Date.now() < until;
+};
+
 /** First unmet rung. Null means she has finished the whole ladder. */
 export function currentRung(bot, ctx) {
   for (const rung of LADDER) {
+    if (isSkipped(ctx, rung.id)) continue;
     let done = false;
     try {
       done = !!rung.done(bot, ctx);
@@ -371,7 +525,7 @@ export function ladderProgress(bot, ctx) {
     try {
       done = !!r.done(bot, ctx);
     } catch {}
-    return { id: r.id, label: r.label, done };
+    return { id: r.id, label: r.label, done, skipped: isSkipped(ctx, r.id) };
   });
   const doneCount = rows.filter((r) => r.done).length;
   return { rows, doneCount, total: rows.length, current: currentRung(bot, ctx)?.id ?? 'complete' };
@@ -381,6 +535,12 @@ export const ladderStatus = {
   count,
   countAny,
   has,
+  owns,
+  ownedCount,
+  ironBudget,
+  wearingFullIron,
+  IRON_FOR_KIT,
+  IRON_TARGET,
   enchantedCount,
   hasEnchantedGear,
   logs,

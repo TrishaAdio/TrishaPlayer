@@ -19,7 +19,7 @@ import { snapshotText } from '../world/state.js';
 import { completeJson, complete, llmStats } from './client.js';
 import { personaCore, personaBrief, CHAT_RULES } from './persona.js';
 import { actionCatalogue, isValidAction } from '../actions.js';
-import { currentRung, ladderProgress } from '../progression.js';
+import { currentRung, ladderProgress, ladderStatus } from '../progression.js';
 import { fastParse, llmParse, smallTalk, addressedToHer, looksLikeQuestion } from '../chat/commands.js';
 import { nearbyEntities, FLYING } from '../world/scan.js';
 import { makePlan, fallbackPlan } from './planner.js';
@@ -38,6 +38,8 @@ export class Brain {
     this.running = false;
     this.paused = false;
     this.rungFailures = new Map();
+    /** Optional rungs temporarily parked because this world cannot satisfy them. */
+    this.skippedRungs = new Map();
     this.lastSpoke = 0;
     this.lastSaid = '';
     this.thinking = false;
@@ -68,7 +70,10 @@ export class Brain {
   }
 
   ctx() {
-    return { bot: this.bot, memory: mem, config: config.ladder, flags: this.flags };
+    // Expire parked rungs so a skipped objective gets another chance later.
+    const now = Date.now();
+    for (const [id, until] of this.skippedRungs) if (now > until) this.skippedRungs.delete(id);
+    return { bot: this.bot, memory: mem, config: config.ladder, flags: this.flags, skip: this.skippedRungs };
   }
 
   // ───────────────────────── speech ─────────────────────────
@@ -233,6 +238,25 @@ export class Brain {
     this._commitUntil = Date.now() + ms;
   }
 
+  /** Is the deterministic ladder still the thing in charge? */
+  ladderActive() {
+    return config.ladder.onSpawn && !this.ladderDone;
+  }
+
+  /**
+   * Park an optional rung that cannot be satisfied here.
+   *
+   * A biome with no sheep made the `bed` rung unsatisfiable, and because it sat three
+   * rungs before iron it walled the ladder off completely — she retried getWool
+   * forever and never mined a single iron ore. Optional rungs now step aside so the
+   * chain can continue, and they are retried later in case the world changed.
+   */
+  skipRung(id, ms = 600000) {
+    this.skippedRungs.set(id, Date.now() + ms);
+    this.rungFailures.set(id, 0);
+    this.plan = [];
+  }
+
   acceptOrder(text, actions, interrupt = true) {
     if (!actions?.length) return;
     // Anything he says invalidates whatever she was planning to do next, and
@@ -269,6 +293,37 @@ export class Brain {
     const doing = this.executor.currentName || this.plan[0]?.name || 'nothing much';
     const lp = ladderProgress(b, this.ctx());
     return `hp ${Math.round(b.health)}/20, food ${Math.round(b.food)}/20, at ${Math.round(p.x)} ${Math.round(p.y)} ${Math.round(p.z)}, doing ${doing} (${lp.doneCount}/${lp.total})`;
+  }
+
+  /**
+   * The progression heartbeat.
+   *
+   * A live run has to be auditable from the console alone: which rung she is on, what
+   * she is doing, and the resource counts the rung predicates actually key off. Without
+   * the iron budget and the worn-armour state on screen it is impossible to tell real
+   * progress from a loop that merely looks busy.
+   */
+  progressLine() {
+    const b = this.bot;
+    const p = b.entity.position;
+    const ctx = this.ctx();
+    const lp = ladderProgress(b, ctx);
+    const s = ladderStatus;
+    const worn = [5, 6, 7, 8]
+      .map((i) => b.inventory.slots[i]?.name?.replace(/_(helmet|chestplate|leggings|boots)$/, '') || '-')
+      .join('/');
+    const held = b.heldItem?.name || 'empty hands';
+    const parts = [
+      `rung ${lp.current} (${lp.doneCount}/${lp.total})`,
+      `doing ${this.executor.currentName || this.plan[0]?.name || 'idle'}`,
+      `at ${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`,
+      `hp ${Math.round(b.health)} food ${Math.round(b.food)}`,
+      `logs ${s.logs(b)} cobble ${s.count(b, 'cobblestone')} iron ${s.ironBudget(b)}/${s.IRON_TARGET}`,
+      `food ${s.foodCount(b)}+${s.rawMeatCount(b)}raw torch ${s.ownedCount(b, 'torch')}`,
+      `armour ${worn}`,
+      `holding ${held}`,
+    ];
+    return parts.join(' | ');
   }
 
   // ───────────────────────── the loop ─────────────────────────
@@ -377,7 +432,31 @@ export class Brain {
       if (busy) {
         const name = this.executor.currentName;
         const budget = BUDGET[name] ?? DEFAULT_BUDGET;
-        const idleFor = now - this._stillSince;
+
+        /**
+         * A FRESH ACTION GETS A FRESH CLOCK.
+         *
+         * The stillness timer was global, so a new action inherited however long the
+         * previous one had been quiet. Observed live: a 64-second `mine` finished, the
+         * next `craft` started, and the watchdog cancelled it one second in —
+         * "cancelling craft (stuck)" — because 64s already exceeded craft's 45s budget.
+         * That is the cancel-then-restart loop, manufactured by the watchdog itself.
+         */
+        if (name !== this._watchedAction) {
+          this._watchedAction = name;
+          this._stillSince = now;
+          this._actionStartedAt = now;
+        }
+
+        /**
+         * Trust an explicit progress report over a position diff. Skills call
+         * task.beat() when they actually achieve something (a log collected, an ingot
+         * pulled from the furnace), which is the only reliable signal for work that is
+         * productive while standing still.
+         */
+        const task = this.executor.current;
+        const lastGood = Math.max(this._stillSince, task?.progressAt || 0, this._actionStartedAt || 0);
+        const idleFor = now - lastGood;
 
         if (idleFor > budget) {
           log.warn(`stuck: ${name} made no progress for ${Math.round(idleFor / 1000)}s (budget ${Math.round(budget / 1000)}s) — unsticking`);
@@ -404,6 +483,9 @@ export class Brain {
         }
         return;
       }
+
+      // Idle means the next action starts its budget from scratch.
+      this._watchedAction = null;
 
       // Case 2: nothing running, nothing queued, and no one is talking to her.
       if (!busy && !this.plan.length) {
@@ -715,6 +797,29 @@ export class Brain {
         this.clearCriticalStrikes(next.name);
       }
 
+      /**
+       * DID THAT RUNG ACTUALLY ACHIEVE ANYTHING?
+       *
+       * Counting only hard failures was not enough. A rung whose actions all report
+       * success while leaving its predicate false loops forever — `torches` was the
+       * clearest case: `mine coal_ore` is optional so it returns ok with nothing, the
+       * torch craft is optional so it returns ok with nothing, and the rung is picked
+       * again on the very next tick. An attempt that ends with the same rung still
+       * current is a failed attempt, whatever the individual steps claimed.
+       */
+      if (!this.plan.length && this.currentRungId && this.ladderActive()) {
+        const still = currentRung(bot, this.ctx());
+        if (still && still.id === this.currentRungId) {
+          const n = (this.rungFailures.get(still.id) || 0) + 1;
+          this.rungFailures.set(still.id, n);
+          log.brain(`rung ${still.id} still unsatisfied after a full attempt (${n}/3)`);
+        } else if (this.currentRungId) {
+          this.rungFailures.set(this.currentRungId, 0);
+          log.brain(`rung ${this.currentRungId} satisfied`);
+          this.currentRungId = null;
+        }
+      }
+
       if (!this.plan.length && this.order) {
         const done = this.order;
         this.order = null;
@@ -734,14 +839,75 @@ export class Brain {
     }
 
     /**
-     * 3b. THE SURVEYED PLAN.
+     * 3b. THE SURVIVAL LADDER — deterministic, free, and now genuinely in charge.
+     *
+     * THE BUG THIS FIXES IS THE WHOLE TICKET.
+     *
+     * The ladder used to sit BELOW the surveyed plan, and a 13-minute live run from a
+     * clean spawn logged the word "ladder" exactly zero times. The model was asked
+     * "what should I do" every 25 seconds and cheerfully answered with a different
+     * seven-step plan each time — build a 5x5 house before owning a pickaxe, walk to a
+     * flat spot, go and look at some iron she could not mine. She started ten things
+     * and finished none, which from outside looks precisely like "random running".
+     *
+     * Progression is not a judgement call. It is a dependency chain, and a predicate
+     * ladder expresses it exactly. So the ladder decides while it is unfinished, and
+     * the model is reserved for the things it is actually good at: a rung that has
+     * failed repeatedly, an explicit order, and life after full kit.
+     */
+    if (this.ladderActive()) {
+      const rung = currentRung(bot, this.ctx());
+      if (rung) {
+        // A rung change is a real state transition and belongs in the log.
+        if (rung.id !== this.currentRungId) {
+          log.brain(`ladder rung -> ${rung.id} (${rung.label})`);
+          this._rungStartedAt = Date.now();
+        }
+        const fails = this.rungFailures.get(rung.id) || 0;
+
+        /**
+         * Escalate, then stop asking. A rung that keeps failing gets one expensive
+         * think, and if it is optional it is skipped outright rather than retried
+         * forever — that is what turned a sheepless biome into a permanent wall at the
+         * `bed` rung, three rungs before iron.
+         */
+        if (fails >= 3) {
+          if (rung.optional) {
+            log.warn(`rung ${rung.id} failed ${fails}x and is optional — skipping it`);
+            this.skipRung(rung.id);
+            return;
+          }
+          log.brain(`rung ${rung.id} stuck after ${fails}, escalating to ${config.llm.smart}`);
+          const decision = await this.think({ tier: 'smart', stuckOn: rung });
+          this.rungFailures.set(rung.id, 0);
+          if (decision) return;
+        }
+
+        const actions = typeof rung.actions === 'function' ? rung.actions(bot, this.ctx()) : rung.actions;
+        log.brain(`ladder: ${rung.id} — ${rung.label} [${actions.map((a) => a.name).join(' -> ')}]`);
+        this.plan.push(...actions);
+        this.currentRungId = rung.id;
+        // Give the rung a fair run before her own wandering thoughts can replace it.
+        this.commit(45000);
+        return;
+      }
+      this.ladderDone = true;
+      log.brain('ladder complete — full kit');
+      this.say('geared up. what now~');
+    }
+
+    /**
+     * 3c. THE SURVEYED PLAN.
      *
      * Before any self-directed work, she scouts the area and has the strong model
      * build a plan against what is actually there. This replaces the old behaviour of
      * re-deciding every six seconds with no knowledge of her surroundings, which is
      * what made her walk into the ocean looking for trees that were not there.
+     *
+     * Only reachable once the ladder is finished, or when he has told her to use her
+     * own judgement. While the ladder is running it is not up for debate.
      */
-    if (config.brain.autonomy && !this.plan.length && !this.sessionPlan?.length) {
+    if (config.brain.autonomy && !this.ladderActive() && !this.plan.length && !this.sessionPlan?.length) {
       // 25s, not 90s. A 22 minute run logged 'idle with an empty queue' eleven times:
       // she finished a plan and then stood around waiting for permission to make a new
       // one. An idle bot with no plan should be planning.
@@ -771,40 +937,21 @@ export class Brain {
       }
     }
 
-    // Work the surveyed plan, one objective at a time.
+    // Work the surveyed plan, one objective at a time. The ladder has already had its
+    // say by this point, so reaching here means there is nothing left to climb.
     if (this.sessionPlan?.length) {
+      if (this.ladderActive()) {
+        // The ladder came back (she lost gear, or died). Drop the stale plan.
+        log.brain('ladder is active again — dropping the surveyed plan');
+        this.sessionPlan = null;
+        return;
+      }
       const step = this.sessionPlan.shift();
       log.brain(`plan step: ${step.name}${step.why ? ` — ${step.why}` : ''}`);
       this._currentStep = step;
       this.plan.push({ name: step.name, args: step.args });
       this.commit(45000);
       return;
-    }
-
-    // 4. The ladder — deterministic, free. Skipped entirely in stability mode, where
-    //    she waits for orders instead of running her own agenda.
-    if (config.ladder.onSpawn && !this.ladderDone) {
-      const rung = currentRung(bot, this.ctx());
-      if (rung) {
-        const fails = this.rungFailures.get(rung.id) || 0;
-        if (fails >= 3) {
-          // Stuck. Spend real tokens on it once, then move on.
-          log.brain(`rung ${rung.id} stuck after ${fails}, escalating to ${config.llm.smart}`);
-          const decision = await this.think({ tier: 'smart', stuckOn: rung });
-          this.rungFailures.set(rung.id, 0);
-          if (decision) return;
-        }
-        const actions = typeof rung.actions === 'function' ? rung.actions(bot, this.ctx()) : rung.actions;
-        log.brain(`ladder: ${rung.id} — ${rung.label}`);
-        this.plan.push(...actions);
-        this.currentRungId = rung.id;
-        // Give the rung a fair run before her own wandering thoughts can replace it.
-        this.commit(45000);
-        return;
-      }
-      this.ladderDone = true;
-      log.brain('ladder complete — full kit');
-      this.say('geared up. what now~');
     }
 
     // 4. Nothing to do: let her decide for herself, but not too often.
@@ -1114,7 +1261,20 @@ export class Brain {
      */
     if (/missing ingredient|no usable recipe/.test(reason)) {
       const item = String(step.args?.item || '');
+      /**
+       * Do not go and chop wood she already has.
+       *
+       * "missing ingredient" was mapped straight to chopWood, so when the real cause was
+       * a bad craft count she was sent to fell trees three times in a row with thirty
+       * logs in her pack — five and a half minutes of a live run, for nothing. If the
+       * material is already there, wood is not the problem and this is not the repair.
+       */
+      const logsHeld = ladderStatus.logs(this.bot) + Math.floor(ladderStatus.planks(this.bot) / 4);
       if (/^wooden_|^crafting_table$|_planks$|^stick$|^bowl$|^chest$/.test(item)) {
+        if (logsHeld >= 8) {
+          log.debug(`not chopping for ${item}: already holding ${logsHeld} logs' worth`);
+          return null;
+        }
         return [{ name: 'chopWood', args: { count: 10 }, why: `no wood for ${item || step.name}` }];
       }
       if (/^stone_|^furnace$/.test(item)) {

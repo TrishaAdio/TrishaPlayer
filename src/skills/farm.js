@@ -106,7 +106,8 @@ export async function forageCrops(bot, task, { radius = 40 } = {}) {
  */
 export async function forageFood(bot, task, { target = 8, urgent = false } = {}) {
   const startCooked = total(bot, COOKED);
-  log.act(`getting food (have ${startCooked}, want ${target})`);
+  const startRaw = total(bot, RAW);
+  log.act(`getting food (has ${startCooked} cooked, ${startRaw} raw, wants ${target})`);
 
   if (urgent) {
     // Starving: eat literally anything, sort quality out later.
@@ -165,8 +166,24 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
   // Wheat into bread as a bonus.
   if (count(bot, 'wheat') >= 3) await craft(bot, task, { item: 'bread', count: Math.floor(count(bot, 'wheat') / 3), optional: true }).catch(() => {});
 
-  const now = total(bot, COOKED);
-  return { ok: now > startCooked || now >= target, detail: `food: ${now} cooked items`, got: now };
+  /**
+   * RAW MEAT IS STILL FOOD.
+   *
+   * This used to score itself on cooked items alone, so a trip that came back with
+   * mutton but no fuel to cook it reported failure — a live run spent 252 seconds here
+   * and logged "getFood -> FAILED: food: 0 cooked items" while carrying meat. The rung
+   * above then counted it as a failed attempt and sent her out again.
+   */
+  const cooked = total(bot, COOKED);
+  const raw = total(bot, RAW);
+  const startEdible = startCooked + startRaw;
+  const edible = cooked + raw;
+  return {
+    ok: edible > startEdible || edible >= target,
+    detail: `food: ${cooked} cooked, ${raw} raw (was ${startEdible})`,
+    got: edible,
+    reason: edible > startEdible ? undefined : 'found nothing edible in range',
+  };
 }
 
 /** Till, plant, and keep a wheat farm — permanent food security. */

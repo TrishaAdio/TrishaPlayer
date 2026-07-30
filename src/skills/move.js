@@ -259,13 +259,40 @@ export async function flee(bot, task, { from, distance = 20 } = {}) {
  * samples several candidate directions and rejects any that head into a large body of
  * water, preferring the one with the most solid ground along the way.
  */
-export async function explore(bot, task, { radius = 80 } = {}) {
+/**
+ * Coarse 32-block cells she has already searched.
+ *
+ * "Search elsewhere" has to mean elsewhere. She re-checked the same forty blocks five
+ * times in a row while starving, and six consecutive `explore` calls in one session all
+ * covered ground she had just walked. Remembering where she has been is what turns
+ * aimless wandering into an actual search.
+ */
+const visitedCells = new Map();
+const cellKey = (x, z) => `${Math.floor(x / 32)},${Math.floor(z / 32)}`;
+const VISIT_TTL = 600000;
+
+function markVisited(pos) {
+  const now = Date.now();
+  visitedCells.set(cellKey(pos.x, pos.z), now);
+  if (visitedCells.size > 512) {
+    for (const [k, t] of visitedCells) if (now - t > VISIT_TTL) visitedCells.delete(k);
+  }
+}
+
+const visitedRecently = (x, z) => {
+  const t = visitedCells.get(cellKey(x, z));
+  return !!t && Date.now() - t < VISIT_TTL;
+};
+
+export async function explore(bot, task, { radius = 80, reason = 'looking for new ground', timeoutMs = 75000 } = {}) {
   const start = bot.entity.position.clone();
   const waterId = bot.mcData.blocksByName.water?.id;
+  markVisited(start);
 
   const scoreBearing = (angle) => {
     let land = 0;
     let water = 0;
+    let seen = 0;
     for (let step = 8; step <= Math.min(radius, 64); step += 8) {
       const p = start.offset(Math.cos(angle) * step, 0, Math.sin(angle) * step).floored();
       // Look down a little for the surface at that column.
@@ -284,8 +311,10 @@ export async function explore(bot, task, { radius = 80 } = {}) {
       }
       if (found && /water/.test(found.name)) water++;
       else if (found) land++;
+      if (visitedRecently(p.x, p.z)) seen++;
     }
-    return { land, water, score: land - water * 3 };
+    // Already-searched ground is worth far less than genuinely new terrain.
+    return { land, water, seen, score: land - water * 3 - seen * 2 };
   };
 
   let best = null;
@@ -301,13 +330,39 @@ export async function explore(bot, task, { radius = 80 } = {}) {
   }
 
   const dest = start.offset(Math.cos(best.angle) * radius, 0, Math.sin(best.angle) * radius);
-  log.act(`exploring toward ${Math.round(dest.x)},${Math.round(dest.z)} (land ${best.land}, water ${best.water})`);
+  log.act(
+    `exploring toward ${Math.round(dest.x)},${Math.round(dest.z)} — ${reason} (land ${best.land}, water ${best.water}, already-seen ${best.seen ?? 0})`,
+  );
+
+  /**
+   * BOUNDED, AND CANCELLABLE.
+   *
+   * This used to call pathfinder.goto with no timeout and no abort watch, so an
+   * exploration toward unreachable terrain ran until something else happened to cancel
+   * it — and an aborted explore kept walking because nothing stopped the goal. Walking
+   * forever is not a search.
+   */
+  const started = Date.now();
+  const watchdog = setInterval(() => {
+    if (task.aborted || Date.now() - started > timeoutMs) stop(bot);
+  }, 250);
+
   try {
     await bot.pathfinder.goto(new GoalXZ(Math.round(dest.x), Math.round(dest.z)));
-    return { ok: true, detail: `explored ${radius} blocks` };
+    const moved = bot.entity.position.distanceTo(start);
+    markVisited(bot.entity.position);
+    task.beat();
+    return { ok: moved > 8, detail: `explored ${Math.round(moved)}m`, reason: moved > 8 ? undefined : 'could not get anywhere new' };
   } catch (err) {
-    if (task.aborted) throw new AbortError();
-    return { ok: false, reason: err.message };
+    if (task.aborted) throw new AbortError(task.reason);
+    const moved = bot.entity.position.distanceTo(start);
+    markVisited(bot.entity.position);
+    // Partial progress still counts: she is somewhere new, which was the point.
+    if (moved > 12) return { ok: true, detail: `explored ${Math.round(moved)}m (path cut short)` };
+    return { ok: false, reason: `could not explore: ${err.message}` };
+  } finally {
+    clearInterval(watchdog);
+    stop(bot);
   }
 }
 

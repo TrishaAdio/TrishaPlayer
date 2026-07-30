@@ -143,12 +143,13 @@ function setup(bot) {
     if (!executor.busy) brain.acceptOrder('(starving)', [{ name: 'getFood', args: { urgent: true } }], true);
   });
 
-  // Periodic heartbeat so you can see she is alive and what she is doing.
+  // Periodic heartbeat so you can see she is alive, what rung she is on, and whether
+  // the numbers her rung predicates depend on are actually moving.
   setInterval(() => {
     if (!bot.entity) return;
-    log.debug(brain.statusLine());
+    log.info(brain.progressLine());
     saveMemory();
-  }, 30000);
+  }, 20000);
 
   // 6. Go.
   setTimeout(() => {

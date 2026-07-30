@@ -182,6 +182,55 @@ ok(
 const progress = ladderProgress(gifted, ctxFor({ x: 0, y: 64, z: 0 }));
 ok(progress.doneCount >= 8, 'ladder progress counts correctly', `${progress.doneCount}/${progress.total} done`);
 
+console.log('\n5b. THE IRON ECONOMY MUST ADD UP\n');
+
+// helmet 5 + chestplate 8 + leggings 7 + boots 4 + pickaxe 3 + sword 2 + shield 1
+ok(ladderStatus.IRON_FOR_KIT === 30, 'the requested iron kit really costs 30 ingots', `${ladderStatus.IRON_FOR_KIT}`);
+ok(ladderStatus.IRON_TARGET >= 30, 'the ladder target is not short of the kit', `target ${ladderStatus.IRON_TARGET}`);
+
+const ironRung = LADDER.find((r) => r.id === 'iron');
+const kitRung = LADDER.find((r) => r.id === 'iron_kit');
+
+// Mined the ore but not yet smelted it.
+const rawIron = makeBot([['raw_iron', ladderStatus.IRON_TARGET]]);
+ok(ironRung.done(rawIron, lateCtx()), 'raw ore satisfies the iron rung', `budget ${ladderStatus.ironBudget(rawIron)}`);
+
+/**
+ * THE OSCILLATION. Half the iron is now armour on her body and the loose ingots are
+ * gone. The old predicate counted loose ingots only, so this state sent her back down
+ * the mine for iron she was already wearing.
+ */
+const midCraft = makeBot(
+  [['iron_pickaxe', 1], ['iron_sword', 1], ['shield', 1], ['iron_ingot', 3]],
+  { head: { name: 'iron_helmet' }, torso: { name: 'iron_chestplate' }, legs: { name: 'iron_leggings' }, feet: { name: 'iron_boots' } },
+);
+ok(ironRung.done(midCraft, lateCtx()), 'spending iron on gear does NOT un-do the iron rung', `budget ${ladderStatus.ironBudget(midCraft)}`);
+ok(kitRung.done(midCraft, lateCtx()), 'full iron kit counts as complete', 'all four worn + pick + sword + shield');
+
+// A shield lives in the off-hand (slot 45), which inventory.items() never reports.
+const offhandShield = makeBot(
+  [['iron_pickaxe', 1], ['iron_sword', 1], ['iron_ingot', 3]],
+  { head: { name: 'iron_helmet' }, torso: { name: 'iron_chestplate' }, legs: { name: 'iron_leggings' }, feet: { name: 'iron_boots' } },
+);
+offhandShield.inventory.slots[45] = { name: 'shield', count: 1 };
+ok(kitRung.done(offhandShield, lateCtx()), 'an equipped off-hand shield still counts as owned', 'slot 45 is read');
+
+// Four equipped items that are not a matching iron set must NOT pass.
+const junkArmour = makeBot(
+  [['iron_pickaxe', 1], ['iron_sword', 1], ['shield', 1]],
+  { head: { name: 'leather_helmet' }, torso: { name: 'golden_chestplate' }, legs: { name: 'leather_leggings' }, feet: { name: 'golden_boots' } },
+);
+ok(!kitRung.done(junkArmour, lateCtx()), 'four unrelated equipped pieces are not full iron armour', 'rejected');
+
+// Cobblestone spent on the stone kit must not send her back to the stone rung.
+const stoneRung = LADDER.find((r) => r.id === 'stone');
+const spentCobble = makeBot([['cobblestone', 6], ['stone_pickaxe', 2], ['stone_sword', 1], ['furnace', 1]]);
+ok(stoneRung.done(spentCobble, lateCtx()), 'spending cobble on the stone kit does NOT un-do the stone rung', '6 cobble left');
+
+// Every optional rung is genuinely marked, so an unsatisfiable one can be parked.
+const optional = LADDER.filter((r) => r.optional).map((r) => r.id);
+ok(optional.includes('bed') && optional.includes('torches'), 'rungs that a world may not support are optional', optional.join(', '));
+
 console.log('\n6. ENDGAME LADDER (enchanting is the real power ceiling)\n');
 
 // Fully kitted in plain diamond -> the next job is obsidian for a table.
