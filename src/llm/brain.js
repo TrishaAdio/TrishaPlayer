@@ -89,6 +89,23 @@ export class Brain {
       .slice(0, 200);
     if (!msg) return;
 
+    /**
+     * NEVER BROADCAST AN ASSISTANT REFUSAL TO THE SERVER.
+     *
+     * This went out to RAREAURA's players verbatim: "I appreciate the creative
+     * scenario, but I need to stick to what I actually am. I'm Kiro, an AI development
+     * environment..." The chat model declined the persona and the refusal was relayed
+     * straight into game chat.
+     *
+     * Prompting alone cannot guarantee this never happens, so the output is filtered
+     * too. A refusal is replaced with a short in-character line, and it is logged so
+     * the cause stays visible instead of silently vanishing.
+     */
+    if (/\b(as an ai|i'?m an ai|i am an ai|language model|i'?m kiro|development environment|can'?t roleplay|cannot roleplay|role-?play as|what i actually am|i'?m not able to pretend|as a bot i)\b/i.test(msg)) {
+      log.warn(`suppressed an out-of-character reply from the chat model: "${msg.slice(0, 80)}"`);
+      msg = ['hm?', 'busy right now', 'one sec babe', 'yeah?'][Math.floor(Math.random() * 4)];
+    }
+
     // Compare on a normalised form so punctuation and emoji cannot smuggle a
     // duplicate past the filter.
     const key = msg.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();

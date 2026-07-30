@@ -33,6 +33,10 @@ const FUELS = ['coal', 'charcoal', 'coal_block', 'blaze_rod', 'dried_kelp_block'
 
 const count = (bot, name) => bot.inventory.items().reduce((n, i) => (i.name === name ? n + i.count : n), 0);
 const findItem = (bot, name) => bot.inventory.items().find((i) => i.name === name);
+
+/** Material tallies, used to decide whether she can simply make a new bench here. */
+const plankCount = (bot) => Object.values(PLANK_FROM_LOG).reduce((n, p) => n + count(bot, p), 0);
+const logCount = (bot) => Object.keys(PLANK_FROM_LOG).reduce((n, l) => n + count(bot, l), 0);
 const findAny = (bot, names) => {
   for (const n of names) {
     const it = findItem(bot, n);
@@ -98,22 +102,49 @@ async function ensureSticks(bot, task, needed = 2) {
 export async function ensureCraftingTable(bot, task) {
   const TABLE_ID = bot.mcData.blocksByName.crafting_table.id;
 
-  let table = bot.findBlock({ matching: TABLE_ID, maxDistance: 32 });
-  if (table) {
-    if (bot.entity.position.distanceTo(table.position) > 3.2) {
-      const res = await goTo(bot, task, table.position.x, table.position.y, table.position.z, { range: 2 });
-      if (!res.ok) table = null;
+  // 1. Already within arm's reach.
+  const near = bot.findBlock({ matching: TABLE_ID, maxDistance: 4 });
+  if (near) return near;
+
+  /**
+   * 2. Can she just put one down right here?
+   *
+   * This is checked BEFORE walking anywhere, and that order matters. She sealed
+   * herself inside a hillside shelter, leaving her bench outside the wall, and then
+   * every craft spent 48 seconds failing to path to it — cancelled by the watchdog,
+   * retried, cancelled again, while her health drained. Two planks solve that
+   * instantly. Walking across the map to a specific table is the last resort, not the
+   * first instinct.
+   */
+  const carried = findItem(bot, 'crafting_table');
+  if (carried) {
+    const placed = await placeSupportBlock(bot, task, carried);
+    if (placed) {
+      lastPlacedTable = placed.position.clone();
+      mem.addWaypoint('bench', placed.position);
+      return placed;
     }
-    if (table) return table;
   }
 
-  // The bench she placed earlier, if it is still a sensible walk away.
+  // 3. One in view, worth a short walk.
+  let table = bot.findBlock({ matching: TABLE_ID, maxDistance: 32 });
+  if (table) {
+    const res = await goTo(bot, task, table.position.x, table.position.y, table.position.z, { range: 2, timeoutMs: 20000 });
+    if (res.ok) {
+      const found = bot.findBlock({ matching: TABLE_ID, maxDistance: 4 });
+      if (found) return found;
+    }
+    table = null;
+  }
+
+  // 4. The remembered camp bench — only if it is genuinely close and she has no
+  //    materials to make a new one.
   const remembered = mem.all.waypoints?.bench;
-  if (remembered) {
+  const canMakeOne = plankCount(bot) >= 4 || logCount(bot) >= 1;
+  if (remembered && !canMakeOne) {
     const pos = new Vec3(remembered.x, remembered.y, remembered.z);
-    const dist = bot.entity.position.distanceTo(pos);
-    if (dist <= 96) {
-      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 60000 });
+    if (bot.entity.position.distanceTo(pos) <= 64) {
+      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 30000 });
       if (res.ok) {
         const found = bot.findBlock({ matching: TABLE_ID, maxDistance: 6 });
         if (found) return found;
