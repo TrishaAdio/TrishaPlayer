@@ -8,6 +8,7 @@
  */
 import { Vec3 } from 'vec3';
 import { log } from '../util/log.js';
+import { config } from '../config.js';
 import { mem } from '../world/memory.js';
 import { AbortError } from '../task.js';
 import { isSafeToDig, groundBelow } from '../world/scan.js';
@@ -778,7 +779,35 @@ export async function placeTorch(bot, task) {
  * Branch mining. Descend to the ore's best Y, then tunnel, scanning constantly and
  * detouring onto anything valuable. Torches as she goes so nothing spawns behind her.
  */
-export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', count = 24, lavaCaution = false, maxTunnel = 260 } = {}) {
+/**
+ * Is there a large open space just ahead?
+ *
+ * Caves are where the mobs are, and she mines iron with no armour on — a live run was
+ * killed by a zombie underground and shot at by a skeleton she could not reach. An open
+ * cavern is a hazard to be tunnelled around, not a shortcut to be walked into.
+ */
+function openSpaceAhead(bot, from, dir, reach = 4) {
+  let air = 0;
+  let checked = 0;
+  for (let d = 1; d <= reach; d++) {
+    for (let dy = 0; dy <= 2; dy++) {
+      for (const side of [-1, 0, 1]) {
+        const p = from.plus(dir.scaled(d)).offset(dir.z * side, dy, dir.x * side);
+        const b = bot.blockAt(p);
+        if (!b) continue;
+        checked++;
+        if (b.boundingBox === 'empty' && !/water|lava/.test(b.name)) air++;
+      }
+    }
+  }
+  return checked > 6 && air / checked > 0.62;
+}
+
+export async function branchMine(
+  bot,
+  task,
+  { targetY = 16, ore = 'iron_ore', count = 24, lavaCaution = false, maxTunnel = 260, scanRadius = config.ladder.oreScan, avoidCaves = true } = {},
+) {
   const names = expandBlockNames(bot, ore);
   const ids = idsFor(bot, names);
   const valuable = idsFor(bot, ['diamond_ore', 'deepslate_diamond_ore', 'ancient_debris', 'emerald_ore', 'deepslate_emerald_ore', 'gold_ore', 'deepslate_gold_ore', 'iron_ore', 'deepslate_iron_ore', 'redstone_ore', 'deepslate_redstone_ore', 'lapis_ore', 'deepslate_lapis_ore', 'coal_ore', 'deepslate_coal_ore', 'copper_ore', 'deepslate_copper_ore']);
@@ -843,8 +872,55 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
       };
     }
 
-    // Look around for anything worth a detour.
-    const found = bot.findBlocks({ matching: valuable, maxDistance: 14, count: 8 });
+    /**
+     * SCAN WIDE FOR THE ORE SHE CAME FOR, THEN WALK TO IT.
+     *
+     * Blind tunnelling is why an entire trip came back empty: she dug a straight line
+     * for hundreds of blocks and simply never crossed a seam. The server already streams
+     * every block of the loaded chunks to her, so searching a wide radius for the target
+     * ore and walking to it is both far faster and far less dangerous than digging on
+     * spec. Tunnelling is now only what she does when there is genuinely nothing in range.
+     */
+    const targets = bot
+      .findBlocks({ matching: ids, maxDistance: scanRadius, count: 32 })
+      .filter((pos) => !isBlacklisted(pos));
+
+    if (targets.length) {
+      log.debug(`[branchMine] ${targets.length} ${names[0]} in range ${scanRadius}m`);
+      for (const pos of targets) {
+        task.check();
+        if (got >= count) break;
+        const b = bot.blockAt(pos);
+        if (!b || !names.includes(b.name)) continue;
+        if (lavaCaution && !isSafeToDig(bot, b)) continue;
+
+        if (bot.entity.position.distanceTo(pos) > 4.2) {
+          const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 25000 });
+          if (!res.ok) {
+            blacklist(pos, 90000);
+            continue;
+          }
+        }
+        const mined = await mineVein(bot, task, bot.blockAt(pos) || b, { max: 16 });
+        if (mined) {
+          got += mined;
+          lastOreAt = Date.now();
+          const p = bot.entity.position;
+          task.beat(
+            `${got}/${count} ${ore} | vein of ${mined} at ${pos.x},${pos.y},${pos.z} | at ${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)} | hp ${Math.round(bot.health)} | food ${bot.food}`,
+            { everyMs: 10000 },
+          );
+        } else {
+          blacklist(pos, 60000);
+        }
+        if (step % 3 === 0) await placeTorch(bot, task).catch(() => {});
+      }
+      continue; // keep working the scan rather than falling through to blind digging
+    }
+
+    // Nothing of the target in range — sweep up anything else useful close by (coal for
+    // torches and furnace fuel especially) before committing to more tunnel.
+    const found = bot.findBlocks({ matching: valuable, maxDistance: 16, count: 8 });
     for (const pos of found) {
       task.check();
       const b = bot.blockAt(pos);
@@ -870,6 +946,15 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
 
     // Advance the 1x2 tunnel.
     const p = bot.entity.position.floored();
+
+    // Turn away from open caverns rather than breaking into them unarmoured.
+    if (avoidCaves && openSpaceAhead(bot, p, dir)) {
+      dir = new Vec3(-dir.z, 0, dir.x);
+      log.reflex(`open cave ahead at ${p.x},${p.y},${p.z} — turning away from it`);
+      await placeTorch(bot, task).catch(() => {});
+      continue;
+    }
+
     const ahead = [p.plus(dir), p.plus(dir).offset(0, 1, 0)];
     let blocked = false;
     for (const t of ahead) {

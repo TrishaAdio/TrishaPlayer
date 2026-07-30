@@ -14,6 +14,7 @@ import { Targeting } from './combat/targeting.js';
 import { CombatEngine } from './combat/engine.js';
 import { Executor } from './actions.js';
 import { Brain } from './llm/brain.js';
+import { installReporter, recordDeath, milestone } from './util/report.js';
 
 export function createTrisha() {
   log.info(`connecting to ${config.mc.host}:${config.mc.port} as ${config.mc.username} (${config.mc.auth})`);
@@ -81,7 +82,10 @@ function setup(bot) {
     brain.onChat(username, message).catch(() => {});
   });
 
-  bot.on('death', () => brain.onDeath());
+  bot.on('death', () => {
+    recordDeath(brain.guessDeathCause());
+    brain.onDeath();
+  });
 
   bot.on('spawn', () => {
     brain.onSpawn();
@@ -150,6 +154,13 @@ function setup(bot) {
     log.info(brain.progressLine());
     saveMemory();
   }, 20000);
+
+  /**
+   * Evidence that survives being killed. A validation run is nearly always stopped
+   * rather than allowed to finish, and without this the whole result dies with the
+   * process — which has already happened several times.
+   */
+  installReporter(bot, brain, executor, { everyMs: 10000 });
 
   // 6. Go.
   setTimeout(() => {

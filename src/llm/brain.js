@@ -21,6 +21,7 @@ import { personaCore, personaBrief, CHAT_RULES } from './persona.js';
 import { actionCatalogue, isValidAction } from '../actions.js';
 import { currentRung, ladderProgress, ladderStatus, LADDER } from '../progression.js';
 import { fastParse, llmParse, smallTalk, addressedToHer, looksLikeQuestion } from '../chat/commands.js';
+import { milestone } from '../util/report.js';
 import { nearbyEntities, FLYING } from '../world/scan.js';
 import { makePlan, fallbackPlan } from './planner.js';
 
@@ -916,6 +917,7 @@ export class Brain {
 
         const actions = typeof rung.actions === 'function' ? rung.actions(bot, this.ctx()) : rung.actions;
         log.brain(`ladder: ${rung.id} — ${rung.label} [${actions.map((a) => a.name).join(' -> ')}]`);
+        milestone(`rung ${rung.id}: ${rung.label}`);
         this.plan.push(...actions);
         this.currentRungId = rung.id;
         // Give the rung a fair run before her own wandering thoughts can replace it.
@@ -924,6 +926,7 @@ export class Brain {
       }
       this.ladderDone = true;
       log.brain('ladder complete — full kit');
+      milestone('LADDER COMPLETE — full kit');
       this.say('geared up. what now~');
     }
 
