@@ -49,6 +49,18 @@ export function installMovement(bot) {
 
   m.scafoldingBlocks = SCAFFOLD.map((n) => mcData.itemsByName[n]?.id).filter((x) => x != null);
 
+  /**
+   * WATER IS EXPENSIVE.
+   *
+   * She drowned in the sea repeatedly over a two hour session. The pathfinder was
+   * treating water as ordinary terrain, so a route straight across a bay looked
+   * cheaper than walking around it — and swimming a long crossing means running out
+   * of air in the middle. Making liquid enormously expensive keeps her on land
+   * whenever land exists, without forbidding a one-block stream crossing outright.
+   */
+  if ('liquidCost' in m) m.liquidCost = 40;
+  m.allowEntityDetection = true;
+
   for (const name of AVOID) {
     const b = mcData.blocksByName[name];
     if (b) {
@@ -239,12 +251,57 @@ export async function flee(bot, task, { from, distance = 20 } = {}) {
   }
 }
 
-/** Wander outward looking for something new. */
+/**
+ * Wander outward looking for something new — but never toward open water.
+ *
+ * The old version picked a purely random bearing. On a coastal spawn that is a coin
+ * flip on walking into the sea, which is precisely how she kept drowning. It now
+ * samples several candidate directions and rejects any that head into a large body of
+ * water, preferring the one with the most solid ground along the way.
+ */
 export async function explore(bot, task, { radius = 80 } = {}) {
   const start = bot.entity.position.clone();
-  const a = Math.random() * Math.PI * 2;
-  const dest = start.offset(Math.cos(a) * radius, 0, Math.sin(a) * radius);
-  log.act(`exploring toward ${Math.round(dest.x)},${Math.round(dest.z)}`);
+  const waterId = bot.mcData.blocksByName.water?.id;
+
+  const scoreBearing = (angle) => {
+    let land = 0;
+    let water = 0;
+    for (let step = 8; step <= Math.min(radius, 64); step += 8) {
+      const p = start.offset(Math.cos(angle) * step, 0, Math.sin(angle) * step).floored();
+      // Look down a little for the surface at that column.
+      let found = null;
+      for (let dy = 6; dy >= -10; dy--) {
+        const b = bot.blockAt(p.offset(0, dy, 0));
+        if (b && b.boundingBox === 'block') {
+          found = b;
+          break;
+        }
+        if (b && waterId != null && b.type === waterId) {
+          water++;
+          found = b;
+          break;
+        }
+      }
+      if (found && /water/.test(found.name)) water++;
+      else if (found) land++;
+    }
+    return { land, water, score: land - water * 3 };
+  };
+
+  let best = null;
+  for (let i = 0; i < 8; i++) {
+    const angle = (Math.PI * 2 * i) / 8 + Math.random() * 0.3;
+    const s = scoreBearing(angle);
+    if (!best || s.score > best.score) best = { angle, ...s };
+  }
+  if (!best) best = { angle: Math.random() * Math.PI * 2, water: 0 };
+
+  if (best.water > 2 && best.land === 0) {
+    return { ok: false, reason: 'every direction from here is water — not swimming' };
+  }
+
+  const dest = start.offset(Math.cos(best.angle) * radius, 0, Math.sin(best.angle) * radius);
+  log.act(`exploring toward ${Math.round(dest.x)},${Math.round(dest.z)} (land ${best.land}, water ${best.water})`);
   try {
     await bot.pathfinder.goto(new GoalXZ(Math.round(dest.x), Math.round(dest.z)));
     return { ok: true, detail: `explored ${radius} blocks` };

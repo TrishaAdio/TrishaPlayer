@@ -12,6 +12,7 @@
     "tune": "node scripts/tune.js",
     "bench": "node scripts/bench.js",
     "netherite-test": "node scripts/netherite-test.js",
+    "survey": "node scripts/survey-test.js",
     "preflight": "node scripts/connect-test.js"
   },
   "engines": {

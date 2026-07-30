@@ -93,7 +93,14 @@ export function standingDanger(bot) {
    * "come here" and "follow me" died instantly with "goal was changed".
    */
   const submerged = bot.entity?.isInWater || /water/.test(legs?.name || '') || /water/.test(feet?.name || '');
-  if (submerged && bot.oxygenLevel !== undefined && bot.oxygenLevel < 10) return 'drowning';
+  /**
+   * React at 16 air, not 10.
+   *
+   * She drowned repeatedly in open water. By the time the bar is at 10 she may be
+   * dozens of blocks from shore, and a long swim back costs more air than she has
+   * left. Reacting early is the entire difference between a wet bot and a dead one.
+   */
+  if (submerged && bot.oxygenLevel !== undefined && bot.oxygenLevel < 16) return 'drowning';
   return null;
 }
 

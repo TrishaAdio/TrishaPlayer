@@ -22,6 +22,7 @@ import { actionCatalogue, isValidAction } from '../actions.js';
 import { currentRung, ladderProgress } from '../progression.js';
 import { fastParse, llmParse, smallTalk, addressedToHer, looksLikeQuestion } from '../chat/commands.js';
 import { nearbyEntities } from '../world/scan.js';
+import { makePlan, fallbackPlan } from './planner.js';
 
 export class Brain {
   constructor({ bot, reflex, combat, targeting, executor, flags }) {
@@ -680,6 +681,50 @@ export class Brain {
       return;
     }
 
+    /**
+     * 3b. THE SURVEYED PLAN.
+     *
+     * Before any self-directed work, she scouts the area and has the strong model
+     * build a plan against what is actually there. This replaces the old behaviour of
+     * re-deciding every six seconds with no knowledge of her surroundings, which is
+     * what made her walk into the ocean looking for trees that were not there.
+     */
+    if (config.brain.autonomy && !this.plan.length && !this.sessionPlan?.length) {
+      if (!this._planning && Date.now() - (this._lastPlanAt || 0) > 90000) {
+        this._planning = true;
+        this._lastPlanAt = Date.now();
+        try {
+          const { inventorySummary } = await import('../world/state.js');
+          const result = await makePlan(bot, {
+            reason: this._planReason || 'starting out',
+            inventorySummary: inventorySummary(bot).join(', '),
+          });
+          this.lastSurvey = result.survey;
+          this._planReason = null;
+          const steps = result.steps || fallbackPlan(bot, result.survey);
+          if (result.say) this.say(result.say);
+          if (steps?.length) {
+            this.sessionPlan = steps;
+            log.brain(`working a ${steps.length}-step plan`);
+          }
+        } catch (err) {
+          log.warn(`planning failed: ${err.message}`);
+        } finally {
+          this._planning = false;
+        }
+        return;
+      }
+    }
+
+    // Work the surveyed plan, one objective at a time.
+    if (this.sessionPlan?.length) {
+      const step = this.sessionPlan.shift();
+      log.brain(`plan step: ${step.name}${step.why ? ` — ${step.why}` : ''}`);
+      this.plan.push({ name: step.name, args: step.args });
+      this.commit(45000);
+      return;
+    }
+
     // 4. The ladder — deterministic, free. Skipped entirely in stability mode, where
     //    she waits for orders instead of running her own agenda.
     if (config.ladder.onSpawn && !this.ladderDone) {
@@ -1019,6 +1064,10 @@ Rules:
 
   // ───────────────────────── events ─────────────────────────
   onDeath() {
+    // A death invalidates the plan: she is somewhere else now, with nothing on her.
+    this.sessionPlan = null;
+    this._lastPlanAt = 0;
+    this._planReason = `you just died to ${this.guessDeathCause()} — plan more carefully this time`;
     const pos = this.bot.entity?.position;
     const cause = this.guessDeathCause();
     mem.recordDeath(cause, pos);

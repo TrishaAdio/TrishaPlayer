@@ -36,6 +36,9 @@ export const config = {
     apiKey: process.env.ZEN_API_KEY || '',
     fast: process.env.MODEL_FAST || 'claude-haiku-4.5',
     smart: process.env.MODEL_SMART || 'claude-opus-5',
+    // Used for the one expensive think that matters: surveying the area and building
+    // a plan against it.
+    planner: process.env.MODEL_PLANNER || 'claude-opus-4.8',
     chat: process.env.MODEL_CHAT || process.env.MODEL_FAST || 'claude-haiku-4.5',
     fastFallbacks: list(process.env.MODEL_FAST_FALLBACKS).length
       ? list(process.env.MODEL_FAST_FALLBACKS)
