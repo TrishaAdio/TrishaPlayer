@@ -108,6 +108,18 @@ export async function digBlock(bot, task, block, { safety = true, harvest = true
     return false;
   }
 
+  /**
+   * MINING LOCK.
+   *
+   * The weapon-ready reflex swaps a tool out for a sword whenever a mob is within 12
+   * blocks. That is right in a fight and catastrophic while mining: it fired between
+   * the tool being equipped and the dig starting, so the harvest check saw a sword in
+   * hand and refused the block. Logged 73 times in one session — she could not mine a
+   * single stone with a pickaxe in her pack.
+   *
+   * While a dig is in progress her hands belong to the pickaxe.
+   */
+  bot._miningNow = true;
   await equipTool(bot, block);
 
   /**
@@ -121,9 +133,14 @@ export async function digBlock(bot, task, block, { safety = true, harvest = true
    */
   if (harvest !== false) {
     const need = bot.mcData.blocks[block.type]?.harvestTools;
-    if (need) {
-      const heldId = bot.heldItem?.type;
-      if (!heldId || !need[heldId]) {
+    if (need && !need[bot.heldItem?.type]) {
+      // Something took her tool out of her hand. Put it back before giving up.
+      const proper = bot.inventory.items().find((i) => need[i.type]);
+      if (proper) {
+        await bot.equip(proper, 'hand').catch(() => {});
+      }
+      if (!need[bot.heldItem?.type]) {
+        bot._miningNow = false;
         log.warn(`${block.name} needs a proper tool — a fist breaks it but drops nothing. skipping.`);
         blacklist(block.position, 20000);
         return false;
@@ -170,6 +187,7 @@ export async function digBlock(bot, task, block, { safety = true, harvest = true
     return false;
   } finally {
     clearTimeout(timer);
+    bot._miningNow = false;
   }
 }
 

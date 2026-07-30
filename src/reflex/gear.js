@@ -188,8 +188,14 @@ export async function weaponReadyCheck(bot, hostileWithin = 12) {
   });
   if (!threat) return false;
 
-  // Do not yank a tool out of her hand mid-swing at a block.
-  if (bot.targetDigBlock) return false;
+  /**
+   * Never take a tool out of her hand while she is mining.
+   *
+   * targetDigBlock alone was not enough: the swap slipped into the window between
+   * equipping the pickaxe and the dig actually starting, which made the harvest check
+   * reject the block. The mining lock covers that whole window.
+   */
+  if (bot.targetDigBlock || bot._miningNow) return false;
 
   try {
     await bot.equip(weapon, 'hand');

@@ -84,14 +84,41 @@ async function ensureSticks(bot, task, needed = 2) {
 }
 
 /** A crafting table within reach — found, placed, or crafted then placed. */
+/**
+ * A crafting table she can reach.
+ *
+ * Two failed approaches before this one. Leaving the bench behind meant every craft
+ * after she walked away failed with "needs a crafting table and she has none". Picking
+ * it up after every craft was worse — she reclaimed it, immediately needed it again,
+ * and burned ten failures a session on the churn.
+ *
+ * A player leaves a bench at camp and walks back to it. So: look nearby, then walk to
+ * the one she remembers placing, and only build a new one if neither is available.
+ */
 export async function ensureCraftingTable(bot, task) {
-  let table = bot.findBlock({ matching: bot.mcData.blocksByName.crafting_table.id, maxDistance: 24 });
+  const TABLE_ID = bot.mcData.blocksByName.crafting_table.id;
+
+  let table = bot.findBlock({ matching: TABLE_ID, maxDistance: 32 });
   if (table) {
     if (bot.entity.position.distanceTo(table.position) > 3.2) {
       const res = await goTo(bot, task, table.position.x, table.position.y, table.position.z, { range: 2 });
       if (!res.ok) table = null;
     }
     if (table) return table;
+  }
+
+  // The bench she placed earlier, if it is still a sensible walk away.
+  const remembered = mem.all.waypoints?.bench;
+  if (remembered) {
+    const pos = new Vec3(remembered.x, remembered.y, remembered.z);
+    const dist = bot.entity.position.distanceTo(pos);
+    if (dist <= 96) {
+      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 60000 });
+      if (res.ok) {
+        const found = bot.findBlock({ matching: TABLE_ID, maxDistance: 6 });
+        if (found) return found;
+      }
+    }
   }
 
   let item = findItem(bot, 'crafting_table');
@@ -110,8 +137,12 @@ export async function ensureCraftingTable(bot, task) {
   if (!item) return null;
 
   const placed = await placeSupportBlock(bot, task, item);
-  // Remember that this one is hers, so it can be collected again afterwards.
-  if (placed) lastPlacedTable = placed.position.clone();
+  if (placed) {
+    lastPlacedTable = placed.position.clone();
+    // Remember where camp is, so she can come back to this bench later.
+    mem.addWaypoint('bench', placed.position);
+    log.act(`bench set up at ${placed.position.x},${placed.position.y},${placed.position.z}`);
+  }
   return placed;
 }
 
@@ -315,8 +346,6 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
       await bot.craft(recipe, times, table || undefined);
       mem.bump('itemsCrafted', times * per);
       log.act(`crafted ${times * per}x ${name}`);
-      // Don't leave the bench behind — she will need it again in five minutes.
-      await reclaimCraftingTable(bot, task).catch(() => {});
       return { ok: true, detail: `crafted ${times * per}x ${name}` };
     } catch (err) {
       if (task.aborted) throw new AbortError();

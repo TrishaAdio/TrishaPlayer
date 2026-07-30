@@ -668,6 +668,24 @@ export class Brain {
           this._retried = null;
           return;
         }
+
+        /**
+         * Repair the cause, then come back to this step. Capped per step so a genuinely
+         * impossible objective cannot become an infinite shopping trip.
+         */
+        this._repairs = this._repairs || new Map();
+        const repairKey = `${next.name}:${result.reason || ''}`.slice(0, 80);
+        const attempts = this._repairs.get(repairKey) || 0;
+        if (attempts < 2) {
+          const repair = this.repairFor(next, result);
+          if (repair?.length) {
+            this._repairs.set(repairKey, attempts + 1);
+            log.brain(`${next.name} blocked (${result.reason}) — fixing that first: ${repair.map((r) => r.name).join(' -> ')}`);
+            this.plan.unshift(...repair.map((r) => ({ name: r.name, args: r.args })), next);
+            this.commit(45000);
+            return;
+          }
+        }
         this._retried = null;
         if (isOrder) {
           this.say(this.shortExcuse(result.reason));
@@ -735,6 +753,7 @@ export class Brain {
     if (this.sessionPlan?.length) {
       const step = this.sessionPlan.shift();
       log.brain(`plan step: ${step.name}${step.why ? ` — ${step.why}` : ''}`);
+      this._currentStep = step;
       this.plan.push({ name: step.name, args: step.args });
       this.commit(45000);
       return;
@@ -973,6 +992,67 @@ export class Brain {
       }
     }
     return best;
+  }
+
+  /**
+   * DEPENDENCY REPAIR — fix the cause instead of announcing the symptom.
+   *
+   * "it just says on it then says that didnt work." Exactly right, and the log showed
+   * why: a plan step failed for a missing prerequisite and she simply moved to the next
+   * step. `mine stone` failed for want of a pickaxe at 08:08:53 and the very next step
+   * began at 08:08:54, so the whole plan drained in seconds having achieved nothing.
+   *
+   * A failure that names what is missing is not a dead end, it is the next task. This
+   * turns "I need a stone pickaxe" into "make a stone pickaxe, then carry on".
+   */
+  repairFor(step, result) {
+    if (!step) return null;
+    const reason = String(result?.reason || '');
+
+    // The skill told us exactly which tool is missing.
+    if (result?.needsTool && typeof result.needsTool === 'string') {
+      return [{ name: 'craft', args: { item: result.needsTool, count: 1 }, why: `need it for ${step.name}` }];
+    }
+
+    // "need 3x cobblestone for stone_pickaxe" — go and get the 3 cobblestone.
+    const m = /need (\d+)x ([a-z_]+)/.exec(reason);
+    if (m) {
+      const count = Math.min(64, Number(m[1]) + 4);
+      const item = m[2];
+      // Raw materials get mined or chopped; everything else gets crafted.
+      if (/^(cobblestone|stone|cobbled_deepslate|deepslate|andesite|diorite|granite)$/.test(item)) {
+        return [{ name: 'mine', args: { block: 'stone', count }, why: `${step.name} needs ${item}` }];
+      }
+      if (/_log$|^log$/.test(item)) {
+        return [{ name: 'chopWood', args: { count }, why: `${step.name} needs logs` }];
+      }
+      if (/_planks$/.test(item)) {
+        return [{ name: 'chopWood', args: { count: 8 }, why: `${step.name} needs planks, so logs first` }];
+      }
+      if (/_ore$|^raw_/.test(item)) {
+        return [{ name: 'mine', args: { block: item.replace(/^raw_/, '') + (item.startsWith('raw_') ? '_ore' : ''), count } }];
+      }
+      return [{ name: 'craft', args: { item, count }, why: `${step.name} needs ${item}` }];
+    }
+
+    // No crafting table in reach: make one.
+    if (/needs a crafting table/.test(reason)) {
+      return [{ name: 'craft', args: { item: 'crafting_table', count: 1 }, why: 'need a bench' }];
+    }
+
+    // Not enough building material.
+    if (/not enough building blocks/.test(reason)) {
+      return [{ name: 'mine', args: { block: 'stone', count: 32 }, why: 'stone for the build' }];
+    }
+
+    // No torches: coal, then torches.
+    if (/no torches/.test(reason)) {
+      return [
+        { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true }, why: 'coal for torches' },
+        { name: 'craft', args: { item: 'torch', count: 8, optional: true }, why: 'light' },
+      ];
+    }
+    return null;
   }
 
   async handleFailure(action, result) {
