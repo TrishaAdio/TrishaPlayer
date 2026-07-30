@@ -126,6 +126,20 @@ export async function goTo(bot, task, x, y, z, { range = 1, timeoutMs = 90000, s
     return { ok: true };
   } catch (err) {
     if (task.aborted) throw new AbortError(task.reason);
+    /**
+     * If the budget is already spent, the retry is theatre.
+     *
+     * The watchdog above is still firing every 200ms once the deadline passes, so the
+     * looser second attempt was cancelled the instant it started and reported "The goal
+     * was changed before it could be completed!". That message then surfaced as the
+     * failure reason, which sent me hunting for a phantom goal-thief when the real
+     * problem was simply that 25 seconds was not enough to reach a tree down a slope.
+     */
+    const spent = Date.now() - started;
+    if (spent >= timeoutMs) {
+      return { ok: false, timedOut: true, reason: `could not reach ${Math.round(x)},${Math.round(y)},${Math.round(z)} within ${Math.round(timeoutMs / 1000)}s` };
+    }
+
     if (/Took too long|No path|Timeout|goal/i.test(err.message || '')) {
       // Try again, less fussy about exactly where she ends up.
       try {

@@ -591,10 +591,20 @@ export async function chopWood(bot, task, { count = 8 } = {}) {
       );
 
       if (dist > 4.0) {
-        const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 25000 });
+        /**
+         * Two attempts, the second one loose.
+         *
+         * A spruce forest on a slope defeated the single strict attempt: trees 5-7m away
+         * but a few blocks below her, 25 seconds was not enough for pathfinder to find a
+         * safe way down, and she blacklisted every tree in the wood and then explored
+         * away from a perfectly good forest. She does not need to stand at the foot of
+         * the trunk — anywhere within reach of any of its logs will do.
+         */
+        let res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 40000 });
+        if (!res.ok) res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 4, timeoutMs: 20000 });
         if (!res.ok) {
-          log.debug(`[chopWood] cannot reach trunk at ${pos.x},${pos.y},${pos.z} (${res.reason}) — blacklisted 3m`);
-          blacklist(pos, 180000);
+          log.debug(`[chopWood] cannot reach trunk at ${pos.x},${pos.y},${pos.z} (${res.reason}) — blacklisted 2m`);
+          blacklist(pos, 120000);
           misses++;
           continue;
         }
@@ -852,6 +862,21 @@ export async function branchMine(
   for (let step = 0; step < maxTunnel && got < count; step++) {
     task.check();
 
+    /**
+     * GET OUT OF THE WATER.
+     *
+     * She drowned at Y=10 chasing a seam inside an aquifer. The reflex layer panicked
+     * three times over 43 seconds and still lost her, because the mining loop kept
+     * pulling her back down to the ore. Abandoning the seam is the correct move: the
+     * trip can resume somewhere dry.
+     */
+    if (bot.entity?.isInWater) {
+      log.reflex('underwater in the mine — abandoning this seam before it drowns her');
+      const { ascendToSurface } = await import('./move.js');
+      await ascendToSurface(bot, task, { targetY: 63, timeoutMs: 45000 }).catch(() => {});
+      return { ok: got > 0, got, detail: `${got} ${ore}, hit water and pulled out`, reason: 'flooded seam — try elsewhere' };
+    }
+
     if (inventoryFull(bot) > 0.9) return { ok: true, detail: `${got} ${ore}, inventory full`, got };
     if (toolNearlyBroken(bot) && !(await ensurePickaxe(bot, task))) {
       return { ok: got > 0, detail: `${got} ${ore}, out of pickaxes`, got, needsTool: 'stone_pickaxe' };
@@ -892,7 +917,20 @@ export async function branchMine(
         if (got >= count) break;
         const b = bot.blockAt(pos);
         if (!b || !names.includes(b.name)) continue;
-        if (lavaCaution && !isSafeToDig(bot, b)) continue;
+
+        /**
+         * ALWAYS check for fluid, not only when lavaCaution was asked for.
+         *
+         * The iron rung calls this without lavaCaution, so nothing stopped her walking
+         * into an aquifer at Y=10 to reach a seam. The server log reads "Trisha drowned"
+         * after 43 seconds of "panic: drowning". Wet iron is not worth dying for — there
+         * is always another seam.
+         */
+        if (!isSafeToDig(bot, b)) {
+          blacklist(pos, 120000);
+          log.debug(`[branchMine] skipping ${b.name} at ${pos.x},${pos.y},${pos.z} — fluid against it`);
+          continue;
+        }
 
         if (bot.entity.position.distanceTo(pos) > 4.2) {
           const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 25000 });
