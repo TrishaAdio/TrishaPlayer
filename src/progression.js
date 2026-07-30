@@ -315,6 +315,34 @@ export const LADDER = [
     ],
   },
   {
+    id: 'mining_kit',
+    label: 'wood, sticks and spare pickaxes for the mining trip',
+    /**
+     * THE RUNG THAT KILLED HER.
+     *
+     * A live run mined the full iron budget and then lost it all. Her last stone pickaxe
+     * broke at Y=11 with zero logs in the pack, so `ensurePickaxe` could not make another
+     * (a pickaxe needs sticks, sticks need planks, planks need logs). With no pickaxe
+     * `pickTier` fell to 0, the ladder correctly dropped back to the `wood` rung — and
+     * she spent five minutes trying to chop trees fifty blocks underground until hunger
+     * and mobs finished her off.
+     *
+     * Carrying wood underground fixes the whole chain: it is sticks for pickaxes AND
+     * planks for a bench to craft them at. Four logs is five more pickaxes.
+     */
+    optional: true,
+    done: (bot) =>
+      logs(bot) + Math.floor(planks(bot) / 4) >= 4 && count(bot, 'stick') >= 8 && ownedCount(bot, 'stone_pickaxe') >= 2,
+    actions: () => [
+      { name: 'chopWood', args: { count: 8 } },
+      { name: 'craft', args: { item: 'stick', count: 16, optional: true } },
+      { name: 'craft', args: { item: 'stone_pickaxe', count: 3, optional: true } },
+      { name: 'craft', args: { item: 'crafting_table', count: 1, optional: true } },
+      // Coal picked up while mining stone turns into light for the trip down.
+      { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
+    ],
+  },
+  {
     id: 'iron',
     label: `mine iron (${IRON_TARGET} ingots' worth)`,
     /**
@@ -350,6 +378,9 @@ export const LADDER = [
      */
     done: (bot) => wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3 && owns(bot, 'shield'),
     actions: () => [
+      // Come up and do the smelting and crafting at camp, in daylight, rather than
+      // standing at Y=11 in the dark with no armour on while a furnace burns.
+      { name: 'home', args: {} },
       { name: 'smelt', args: { item: 'iron_ingot', count: IRON_TARGET } },
       { name: 'craft', args: { item: 'iron_pickaxe', count: 1 } },
       { name: 'craft', args: { item: 'iron_sword', count: 1 } },

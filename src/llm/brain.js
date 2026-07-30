@@ -19,7 +19,7 @@ import { snapshotText } from '../world/state.js';
 import { completeJson, complete, llmStats } from './client.js';
 import { personaCore, personaBrief, CHAT_RULES } from './persona.js';
 import { actionCatalogue, isValidAction } from '../actions.js';
-import { currentRung, ladderProgress, ladderStatus } from '../progression.js';
+import { currentRung, ladderProgress, ladderStatus, LADDER } from '../progression.js';
 import { fastParse, llmParse, smallTalk, addressedToHer, looksLikeQuestion } from '../chat/commands.js';
 import { nearbyEntities, FLYING } from '../world/scan.js';
 import { makePlan, fallbackPlan } from './planner.js';
@@ -814,8 +814,19 @@ export class Brain {
           this.rungFailures.set(still.id, n);
           log.brain(`rung ${still.id} still unsatisfied after a full attempt (${n}/3)`);
         } else if (this.currentRungId) {
+          /**
+           * The rung changed — but forward or backward? A regression matters far more
+           * than progress: it means she lost gear (a broken pickaxe, a death) and the
+           * log must say so plainly rather than claiming the old rung was "satisfied".
+           */
+          const order = LADDER.map((r) => r.id);
+          const moved = order.indexOf(still?.id ?? '') - order.indexOf(this.currentRungId);
+          if (still && moved < 0) {
+            log.warn(`ladder REGRESSED from ${this.currentRungId} back to ${still.id} — she has lost something she had`);
+          } else {
+            log.brain(`rung ${this.currentRungId} satisfied`);
+          }
           this.rungFailures.set(this.currentRungId, 0);
-          log.brain(`rung ${this.currentRungId} satisfied`);
           this.currentRungId = null;
         }
       }

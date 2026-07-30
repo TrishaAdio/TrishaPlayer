@@ -367,6 +367,38 @@ export async function explore(bot, task, { radius = 80, reason = 'looking for ne
 }
 
 /** Descend to a target Y with a safe staircase rather than a suicide shaft. */
+/**
+ * Get back up to daylight.
+ *
+ * Needed because a rung can legitimately send her to the surface while she is deep in a
+ * mine — a live run had her looping `chopWood` at Y=11 for five minutes, because there
+ * are no trees fifty blocks underground and "search sideways" can never find one.
+ * Pathfinder can dig and tower, so a plain Y goal is enough.
+ */
+export async function ascendToSurface(bot, task, { targetY = 62, timeoutMs = 90000 } = {}) {
+  const startY = bot.entity.position.y;
+  if (startY >= targetY - 2) return { ok: true, detail: 'already at the surface' };
+  log.act(`surfacing from Y=${Math.round(startY)} to Y=${targetY}`);
+
+  const started = Date.now();
+  const watchdog = setInterval(() => {
+    if (task.aborted || Date.now() - started > timeoutMs) stop(bot);
+  }, 250);
+  try {
+    await bot.pathfinder.goto(new GoalY(targetY));
+    return { ok: true, detail: `surfaced to Y=${Math.round(bot.entity.position.y)}` };
+  } catch (err) {
+    if (task.aborted) throw new AbortError(task.reason);
+    const gained = bot.entity.position.y - startY;
+    return gained > 6
+      ? { ok: true, detail: `climbed ${Math.round(gained)} blocks` }
+      : { ok: false, reason: `could not surface: ${err.message}` };
+  } finally {
+    clearInterval(watchdog);
+    stop(bot);
+  }
+}
+
 export async function descendTo(bot, task, targetY, { safe = true } = {}) {
   const { digDown } = await import('./gather.js');
   return digDown(bot, task, { toY: targetY, staircase: safe });

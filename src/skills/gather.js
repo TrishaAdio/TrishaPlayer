@@ -503,6 +503,7 @@ export async function chopWood(bot, task, { count = 8 } = {}) {
   let misses = 0;
   let explores = 0;
   let broke = 0;
+  let surfaced = 0;
   let radius = 48;
   const MAX_EXPLORES = 3;
   const HARD_LIMIT_MS = 240000;
@@ -520,6 +521,22 @@ export async function chopWood(bot, task, { count = 8 } = {}) {
       .filter((p) => !isBlacklisted(p) && isTrunkBase(bot, p));
 
     if (!positions.length) {
+      /**
+       * No trees grow underground. Searching sideways at Y=11 can never succeed, and a
+       * live run burned five minutes and then a death proving it. Go up first.
+       */
+      if (bot.entity.position.y < 55 && surfaced < 2) {
+        surfaced++;
+        const { ascendToSurface } = await import('./move.js');
+        log.act(`[chopWood] no trees at Y=${Math.round(bot.entity.position.y)} — surfacing before searching (${surfaced}/2)`);
+        const up = await ascendToSurface(bot, task, { targetY: 63 }).catch(() => ({ ok: false }));
+        if (!up.ok) {
+          const { goHome } = await import('./move.js');
+          await goHome(bot, task).catch(() => {});
+        }
+        continue;
+      }
+
       misses++;
       if (explores >= MAX_EXPLORES) {
         return {
