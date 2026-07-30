@@ -38,8 +38,17 @@ export function installMovement(bot) {
    */
   m.allowParkour = true;
   m.allowSprinting = true;
-  if ('maxParkourJump' in m) m.maxParkourJump = 4;
-  if ('parkourCost' in m) m.parkourCost = 1; // stop treating jumps as expensive
+  /**
+   * Two blocks, not four.
+   *
+   * A 4-block parkour jump is a coin flip, and on a mountain spawn a missed jump is not
+   * a stumble — it is a 30-block drop. A live run died twice in ninety seconds on a
+   * cliff world ("Trisha fell from a high place", then "doomed to fall by Skeleton")
+   * while pathing to trees below her. A 2-block hop still takes the direct routes a
+   * walking bot cannot, without betting her life on the landing.
+   */
+  if ('maxParkourJump' in m) m.maxParkourJump = 2;
+  if ('parkourCost' in m) m.parkourCost = 2;
 
   // Never take fall damage on purpose. Parkour is fine; falling is not.
   m.maxDropDown = 3;
@@ -243,11 +252,20 @@ export async function flee(bot, task, { from, distance = 20 } = {}) {
   }
   const dest = me.plus(away);
   log.act(`fleeing to ${Math.round(dest.x)},${Math.round(dest.z)}`);
+  /**
+   * Flee CAREFULLY. Panic is not a licence to run off a cliff — a live run fled a
+   * creeper straight down a mountainside, losing 17 blocks of altitude in six seconds,
+   * and was dead of fall damage a minute later. Safe movements refuse big drops.
+   */
+  bot.pathfinder.setMovements(bot.safeMovements);
   try {
     await bot.pathfinder.goto(new GoalXZ(Math.round(dest.x), Math.round(dest.z)));
     return { ok: true };
   } catch (err) {
+    if (task.aborted) throw new AbortError(task.reason);
     return { ok: false, reason: err.message };
+  } finally {
+    bot.pathfinder.setMovements(bot.movements);
   }
 }
 

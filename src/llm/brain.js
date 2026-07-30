@@ -40,6 +40,8 @@ export class Brain {
     this.rungFailures = new Map();
     /** Optional rungs temporarily parked because this world cannot satisfy them. */
     this.skippedRungs = new Map();
+    /** Mobs she has already failed to reach — see the futile-target guard in step(). */
+    this._futileTargets = new Map();
     this.lastSpoke = 0;
     this.lastSaid = '';
     this.thinking = false;
@@ -593,7 +595,9 @@ export class Brain {
       const remaining = [...this.plan];
       log.brain(`self defence: ${threat.name || threat.username} at ${threat.distance}m (was ${this.executor.currentName || 'idle'})`);
 
-      this.plan = [{ name: 'attack', args: { target: threat.username || threat.name || 'nearest' } }];
+      // 30s, not the 90s default. A fight she cannot win in half a minute is a fight she
+      // cannot reach — see the futile-target guard below.
+      this.plan = [{ name: 'attack', args: { target: threat.username || threat.name || 'nearest', timeoutMs: 30000 } }];
       // Keep his orders; ladder work re-derives itself.
       if (this.order) this.plan.push(...remaining);
       this.executor.cancel('defending myself');
@@ -795,6 +799,22 @@ export class Brain {
         this._retried = null;
         // It worked — forget any strikes against it.
         this.clearCriticalStrikes(next.name);
+        if (next.name === 'attack') this._futileTargets.delete(String(next.args?.target || ''));
+      }
+
+      /**
+       * A TARGET SHE CANNOT BEAT IS A TARGET SHE MUST STOP PICKING.
+       *
+       * A live run fought the same skeleton three times for ninety seconds each — 270
+       * seconds standing on one spot, while her food fell from 16 to 0 and she starved
+       * afterwards. It was on a ledge she could not reach. Failing once is information;
+       * failing three times is a loop.
+       */
+      if (next.name === 'attack' && !result.ok && /timed out|escaped|unreachable|cannot reach/i.test(result.reason || '')) {
+        const key = String(next.args?.target || 'nearest');
+        const n = (this._futileTargets.get(key)?.n || 0) + 1;
+        this._futileTargets.set(key, { n, until: Date.now() + (n >= 2 ? 120000 : 30000) });
+        log.warn(`cannot get at ${key} (${n}x) — leaving it alone and getting back to work`);
       }
 
       /**
@@ -1027,6 +1047,18 @@ export class Brain {
     return true;
   }
 
+  /** Has she already failed to reach this target recently? */
+  futile(name) {
+    const key = String(name ?? '');
+    const rec = this._futileTargets.get(key);
+    if (!rec) return false;
+    if (Date.now() > rec.until) {
+      this._futileTargets.delete(key);
+      return false;
+    }
+    return true;
+  }
+
   /** An action that worked clears its strikes. */
   clearCriticalStrikes(name) {
     if (this._critGate?.has(name)) {
@@ -1155,6 +1187,8 @@ export class Brain {
       bot.inventory.items().some((i) => /arrow/.test(i.name));
 
     const candidates = nearbyEntities(bot, 12).filter((e) => {
+      // Already proved she cannot get at this kind of thing from here.
+      if (this.futile(e.username || e.name)) return false;
       /**
        * PLAYERS. This filter used to require isHostile, which is false for every
        * player — so the self-defence watcher was structurally incapable of reacting
