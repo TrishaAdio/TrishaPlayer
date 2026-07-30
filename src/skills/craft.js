@@ -110,7 +110,39 @@ export async function ensureCraftingTable(bot, task) {
   if (!item) return null;
 
   const placed = await placeSupportBlock(bot, task, item);
+  // Remember that this one is hers, so it can be collected again afterwards.
+  if (placed) lastPlacedTable = placed.position.clone();
   return placed;
+}
+
+/**
+ * Take the bench with her.
+ *
+ * She placed a crafting table, crafted, then walked sixty blocks away — and every
+ * later craft failed with "needs a crafting table and she has none" while her table
+ * sat abandoned on a hillside. That single behaviour blocked the entire tool chain:
+ * no stone pickaxe, so no iron, so no progress. A real player picks the bench back up.
+ */
+let lastPlacedTable = null;
+
+export async function reclaimCraftingTable(bot, task) {
+  if (!lastPlacedTable) return false;
+  const pos = lastPlacedTable;
+  lastPlacedTable = null;
+
+  const block = bot.blockAt(pos);
+  if (!block || block.name !== 'crafting_table') return false;
+  if (bot.entity.position.distanceTo(pos) > 4.5) return false;
+
+  try {
+    const { digBlock, collectDrops } = await import('./gather.js');
+    if (await digBlock(bot, task, block, { safety: false })) {
+      await collectDrops(bot, task, { radius: 4, quiet: true });
+      log.debug('picked the crafting table back up');
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 /** Place a block-item next to her on solid ground and return the placed block. */
@@ -283,6 +315,8 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
       await bot.craft(recipe, times, table || undefined);
       mem.bump('itemsCrafted', times * per);
       log.act(`crafted ${times * per}x ${name}`);
+      // Don't leave the bench behind — she will need it again in five minutes.
+      await reclaimCraftingTable(bot, task).catch(() => {});
       return { ok: true, detail: `crafted ${times * per}x ${name}` };
     } catch (err) {
       if (task.aborted) throw new AbortError();

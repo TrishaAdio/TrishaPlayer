@@ -310,8 +310,14 @@ export const ACTIONS = {
   // ── food ───────────────────────────────────────────────────
   getFood: {
     group: 'farm',
+    /**
+     * Count is clamped. The model once asked for 64 food, which sent her hunting for
+     * three solid minutes and eighty blocks out of range before anything else could
+     * happen. Sixteen is more than a full day's supply.
+     */
     describe: 'getFood{count} hunt, forage and cook food',
-    run: ({ bot, task }, a) => farm.forageFood(bot, task, { target: num(a.count ?? a.target, 8), urgent: !!a.urgent }),
+    run: ({ bot, task }, a) =>
+      farm.forageFood(bot, task, { target: Math.min(16, num(a.count ?? a.target, 8)), urgent: !!a.urgent }),
   },
   forageFood: {
     group: 'farm',

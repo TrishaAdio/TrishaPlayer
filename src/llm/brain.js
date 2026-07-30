@@ -136,6 +136,21 @@ export class Brain {
         this.say(reply || 'hey you');
         return;
       }
+      if (fast.ambient) {
+        /**
+         * "Grind" means use your judgement — so re-survey and plan properly, rather
+         * than improvising four actions that discard the plan she already made.
+         */
+        log.brain('ambient order — surveying and planning fresh');
+        this.sessionPlan = null;
+        this._lastPlanAt = 0;
+        this._planReason = `${config.owner} told you to "${message.slice(0, 60)}" — decide for yourself and commit to it`;
+        this.plan = [];
+        this.order = null;
+        this.holdUntil = 0;
+        this.say('on it, lemme look around first');
+        return;
+      }
       if (fast.stopOnly) {
         /**
          * "Stop" has to mean stop.

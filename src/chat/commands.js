@@ -62,6 +62,21 @@ const RULES = [
     re: /^(hi|hey|hello|yo|sup|hii+|heya|gm|good morning|good night|gn|thanks|ty|thank you|gg|nice|lol|ok|okay)\b\s*$/,
     build: () => ({ actions: [], reply: null, greeting: true }),
   },
+  /**
+   * AMBIENT ORDERS — "grind", "play by yourself", "go be productive".
+   *
+   * These are not instructions to do one specific thing; they mean "use your own
+   * judgement". Sending them to the ad-hoc intent parser was catastrophic: on a live
+   * run she surveyed the area, built a sensible seven-step plan, and then a single
+   * "grind" produced come/getFood/branchMine/xpGrind that overwrote it in the same
+   * millisecond. She never chopped a log the entire session.
+   *
+   * So an ambient order now triggers a fresh survey and plan, and she works that.
+   */
+  {
+    re: /\b(grind|grinding|play by (your|ur)self|do (your|ur) (own )?thing|be productive|make a plan|plan and play|progress|level up|get (stronger|powerful)|become powerful|go hard|farm up)\b/,
+    build: () => ({ actions: [], reply: null, ambient: true }),
+  },
   // stop / hold
   {
     re: /^(stop|wait|halt|stay|hold on|chill|freeze|cancel|nvm|never mind)\b/,

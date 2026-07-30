@@ -94,7 +94,7 @@ function blacklist(pos, ms = 120000) {
  * posture, mining nothing, with nothing at all in the log. A dig that overruns three
  * times its expected duration is not going to finish.
  */
-export async function digBlock(bot, task, block, { safety = true } = {}) {
+export async function digBlock(bot, task, block, { safety = true, harvest = true } = {}) {
   task.check();
   if (!block) return false;
   if (isBlacklisted(block.position)) return false;
@@ -110,11 +110,40 @@ export async function digBlock(bot, task, block, { safety = true } = {}) {
 
   await equipTool(bot, block);
 
+  /**
+   * THE ONE THAT WASTED NINE MINUTES.
+   *
+   * Stone broken with a fist breaks fine — and drops absolutely nothing. So she would
+   * "mine" successfully forever while her inventory never grew, which is exactly what
+   * "mining but not mining" looked like from outside. If a block needs a tool she does
+   * not have, digging it is pure loss: refuse, and say what is missing so the layer
+   * above can go and craft one.
+   */
+  if (harvest !== false) {
+    const need = bot.mcData.blocks[block.type]?.harvestTools;
+    if (need) {
+      const heldId = bot.heldItem?.type;
+      if (!heldId || !need[heldId]) {
+        log.warn(`${block.name} needs a proper tool — a fist breaks it but drops nothing. skipping.`);
+        blacklist(block.position, 20000);
+        return false;
+      }
+    }
+  }
+
+  /**
+   * Trust digTime, and give it room.
+   *
+   * bot.digTime() already accounts for the held tool AND the ~4.75x penalty for mining
+   * while in water. The old cap of 20s ignored that: a fist on stone underwater is
+   * legitimately ~35s, so every such dig was declared "stalled" and abandoned. Eleven
+   * in a row on one live run, nine minutes, nothing gained.
+   */
   let expected = 3000;
   try {
     expected = bot.digTime(block) || 3000;
   } catch {}
-  const limit = Math.min(20000, Math.max(4000, expected * 3 + 1500));
+  const limit = Math.min(60000, Math.max(5000, expected * 2.5 + 2000));
 
   let timer;
   try {
@@ -209,6 +238,39 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
   const MAX_EXPLORES = 2;
   const STALL_MS = 35000;
   const HARD_LIMIT_MS = 150000;
+
+  /**
+   * Check she can actually harvest this before walking anywhere.
+   *
+   * Without this she would trek to a stone face with bare hands and mine for nine
+   * minutes for zero items. Failing immediately with a clear reason lets the planner
+   * or the ladder go and make a pickaxe, which is the actual next step.
+   */
+  const sample = bot.mcData.blocksByName[names[0]];
+  if (sample?.harvestTools) {
+    const usable = bot.inventory.items().some((i) => sample.harvestTools[i.type]);
+    if (!usable) {
+      /**
+       * Name the tool she actually needs, not just "a pickaxe".
+       *
+       * She had a wooden pickaxe and was told "cannot harvest iron_ore without a
+       * pickaxe", which is both true and useless — iron needs STONE tier or better.
+       * The layer above cannot fix a problem it has been described wrongly.
+       */
+      const accepted = Object.keys(sample.harvestTools)
+        .map((id) => bot.mcData.items[Number(id)]?.name)
+        .filter(Boolean);
+      const tiers = ['wooden', 'stone', 'iron', 'golden', 'diamond', 'netherite'];
+      const cheapest = tiers.find((t) => accepted.some((a) => a.startsWith(t)));
+      const kind = accepted[0]?.split('_').slice(1).join('_') || 'pickaxe';
+      const needed = cheapest ? `${cheapest}_${kind}` : accepted[0] || 'a better tool';
+      return {
+        ok: false,
+        reason: `${names[0]} needs at least a ${needed} — it drops nothing by hand`,
+        needsTool: needed,
+      };
+    }
+  }
 
   log.act(`mining ${count}x ${names[0]}`);
 
