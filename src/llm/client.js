@@ -52,6 +52,7 @@ export async function complete({
   maxTokens = 700,
   temperature = 0.6,
   attempts = 2,
+  timeoutMs = null,
 }) {
   const candidates = candidatesFor(tier, model);
   let lastErr;
@@ -68,7 +69,12 @@ export async function complete({
       const t0 = Date.now();
       try {
         stats.calls++;
-        const res = await client.chat.completions.create(payload);
+        // Per-call timeout override, so a long deliberate planning call is not held to
+        // the same budget as a fast in-combat decision.
+        const res = await client.chat.completions.create(
+          payload,
+          timeoutMs ? { timeout: timeoutMs } : undefined,
+        );
         const ms = Date.now() - t0;
         stats.totalMs += ms;
         stats.byModel[chosen] = stats.byModel[chosen] || { calls: 0, ms: 0 };

@@ -11,7 +11,7 @@ import { log } from '../util/log.js';
 import { mem } from '../world/memory.js';
 import { AbortError } from '../task.js';
 import { isSafeToDig, groundBelow } from '../world/scan.js';
-import { equipTool, toolNearlyBroken, bestPickaxe } from '../reflex/gear.js';
+import { equipTool, toolNearlyBroken, bestPickaxe, bestAxe } from '../reflex/gear.js';
 import { goTo, stopMoving } from './move.js';
 
 const LOG_TYPES = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'pale_oak_log'];
@@ -266,7 +266,27 @@ export async function mine(bot, task, { block, count = 1, maxDistance = 64, opti
    */
   const sample = bot.mcData.blocksByName[names[0]];
   if (sample?.harvestTools) {
-    const usable = bot.inventory.items().some((i) => sample.harvestTools[i.type]);
+    /**
+     * A tool one hit from snapping is not a usable tool.
+     *
+     * She crafted three wooden pickaxes in eight minutes — 59 uses each — and each time
+     * one broke mid-job the whole objective failed and the plan moved on, which is why
+     * she never reached coal or iron. Reporting the need up front lets the repair step
+     * craft a replacement (ideally a better one) before she walks anywhere.
+     */
+    const candidates = bot.inventory.items().filter((i) => sample.harvestTools[i.type]);
+    const healthy = candidates.filter((i) => !toolNearlyBroken(bot, i));
+    if (candidates.length && !healthy.length) {
+      const best = candidates[0];
+      const upgrade = best.name.startsWith('wooden_') ? best.name.replace('wooden_', 'stone_') : best.name;
+      return {
+        ok: false,
+        reason: `${best.name} is about to break — needs a fresh ${upgrade} before mining ${names[0]}`,
+        needsTool: upgrade,
+      };
+    }
+
+    const usable = healthy.length > 0;
     if (!usable) {
       /**
        * Name the tool she actually needs, not just "a pickaxe".

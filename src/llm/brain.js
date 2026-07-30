@@ -723,7 +723,10 @@ export class Brain {
      * what made her walk into the ocean looking for trees that were not there.
      */
     if (config.brain.autonomy && !this.plan.length && !this.sessionPlan?.length) {
-      if (!this._planning && Date.now() - (this._lastPlanAt || 0) > 90000) {
+      // 25s, not 90s. A 22 minute run logged 'idle with an empty queue' eleven times:
+      // she finished a plan and then stood around waiting for permission to make a new
+      // one. An idle bot with no plan should be planning.
+      if (!this._planning && Date.now() - (this._lastPlanAt || 0) > 25000) {
         this._planning = true;
         this._lastPlanAt = Date.now();
         try {
@@ -1009,9 +1012,22 @@ export class Brain {
     if (!step) return null;
     const reason = String(result?.reason || '');
 
-    // The skill told us exactly which tool is missing.
+    /**
+     * The skill told us exactly which tool is missing.
+     *
+     * Two at a time for pickaxes: wooden ones last 59 blocks and she was losing whole
+     * objectives to a snapped tool, then crafting a single replacement that also broke.
+     * A spare costs three cobblestone and saves a wasted trip.
+     */
     if (result?.needsTool && typeof result.needsTool === 'string') {
-      return [{ name: 'craft', args: { item: result.needsTool, count: 1 }, why: `need it for ${step.name}` }];
+      const tool = result.needsTool;
+      const count = /_pickaxe$/.test(tool) ? 2 : 1;
+      const steps = [{ name: 'craft', args: { item: tool, count }, why: `need it for ${step.name}` }];
+      // Upgrading to stone is nearly free once she is already mining stone.
+      if (tool.startsWith('stone_')) {
+        steps.unshift({ name: 'mine', args: { block: 'stone', count: 12 }, why: 'cobble for the better tool' });
+      }
+      return steps;
     }
 
     // "need 3x cobblestone for stone_pickaxe" — go and get the 3 cobblestone.
@@ -1038,6 +1054,34 @@ export class Brain {
     // No crafting table in reach: make one.
     if (/needs a crafting table/.test(reason)) {
       return [{ name: 'craft', args: { item: 'crafting_table', count: 1 }, why: 'need a bench' }];
+    }
+
+    /**
+     * "missing ingredient" — mineflayer's generic craft rejection, with no clue about
+     * what was missing. It had NO repair mapping, so it was a hard dead end: she looped
+     * mine-stone -> pickaxe-broke -> craft-pickaxe -> missing ingredient -> forever, and
+     * never once reached stone tier in a 22 minute run. Infer the material from what she
+     * was trying to make.
+     */
+    if (/missing ingredient|no usable recipe/.test(reason)) {
+      const item = String(step.args?.item || '');
+      if (/^wooden_|^crafting_table$|_planks$|^stick$|^bowl$|^chest$/.test(item)) {
+        return [{ name: 'chopWood', args: { count: 10 }, why: `no wood for ${item || step.name}` }];
+      }
+      if (/^stone_|^furnace$/.test(item)) {
+        return [{ name: 'mine', args: { block: 'stone', count: 16 }, why: `no cobble for ${item}` }];
+      }
+      if (/^iron_/.test(item)) {
+        return [
+          { name: 'mine', args: { block: 'iron_ore', count: 6, optional: true }, why: 'raw iron' },
+          { name: 'smelt', args: { item: 'iron_ingot', count: 6 }, why: 'smelt it' },
+        ];
+      }
+      if (/^torch$/.test(item)) {
+        return [{ name: 'mine', args: { block: 'coal_ore', count: 6, optional: true }, why: 'coal for torches' }];
+      }
+      // Unknown recipe: wood is the cheapest thing that unblocks most of them.
+      return [{ name: 'chopWood', args: { count: 8 }, why: 'restock basics' }];
     }
 
     // Not enough building material.

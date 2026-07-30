@@ -84,6 +84,10 @@ ${extra}`;
       messages: [{ role: 'user', content: user }],
       maxTokens: 1200,
       temperature: 0.3,
+      // The planner prompt is long and opus is deliberate; the default 20s budget was
+      // timing it out repeatedly ("planner failed: Request timed out"), which dropped
+      // her back to improvising. This one call is worth waiting for.
+      timeoutMs: 60000,
     });
 
     const steps = sanitisePlan(json);
