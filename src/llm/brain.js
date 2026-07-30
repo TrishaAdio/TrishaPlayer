@@ -1326,8 +1326,18 @@ export class Brain {
       if (/_log$|^log$/.test(item)) {
         return [{ name: 'chopWood', args: { count }, why: `${step.name} needs logs` }];
       }
-      if (/_planks$/.test(item)) {
-        return [{ name: 'chopWood', args: { count: 8 }, why: `${step.name} needs planks, so logs first` }];
+      /**
+       * A missing stick or plank means a missing LOG.
+       *
+       * `stick` had no mapping, so "need 1x stick for torch" repaired itself by trying to
+       * craft a stick — which needs planks, which need logs, which she did not have. A
+       * live run sat on 27 coal unable to make a single torch because of it.
+       */
+      if (/_planks$|^stick$/.test(item)) {
+        const held = ladderStatus.logs(this.bot) + Math.floor(ladderStatus.planks(this.bot) / 4);
+        if (held < 2) {
+          return [{ name: 'chopWood', args: { count: 8 }, why: `${step.name} needs ${item}, so logs first` }];
+        }
       }
       if (/_ore$|^raw_/.test(item)) {
         return [{ name: 'mine', args: { block: item.replace(/^raw_/, '') + (item.startsWith('raw_') ? '_ore' : ''), count } }];

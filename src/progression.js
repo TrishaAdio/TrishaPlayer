@@ -289,8 +289,14 @@ export const LADDER = [
      */
     optional: true,
     done: (bot) => ownedCount(bot, 'torch') >= 16,
-    actions: () => [
+    /**
+     * A torch is coal AND a stick. She reached this rung holding 27 coal and zero logs,
+     * so every craft failed on "need 1x stick" — the wood has to be part of the rung.
+     */
+    actions: (bot) => [
+      ...(logs(bot) + Math.floor(planks(bot) / 4) < 2 ? [{ name: 'chopWood', args: { count: 6 } }] : []),
       { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true } },
+      { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
       { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
     ],
   },
