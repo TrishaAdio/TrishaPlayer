@@ -114,7 +114,23 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
     if (anyRaw === 0) {
       await butcher(bot, task, { count: 2 }).catch(() => {});
       const crops = await forageCrops(bot, task, { radius: 32 }).catch(() => ({}));
+
+      /**
+       * WIDEN THE SEARCH, ONCE.
+       *
+       * She hit 0 food and 4 health and then re-searched the same forty blocks five
+       * times in a row, wandering in circles while starving. If nothing edible is within
+       * the normal radius, the answer is to go somewhere genuinely different — one long
+       * trip — rather than to keep re-checking ground she has already covered.
+       */
       if (!crops.ok && total(bot, RAW) === 0) {
+        const { explore } = await import('./move.js');
+        log.act('nothing edible in range — making one long trip to new ground');
+        await explore(bot, task, { radius: 140 }).catch(() => {});
+        await butcher(bot, task, { count: 2 }).catch(() => {});
+        if (total(bot, RAW) === 0) await forageCrops(bot, task, { radius: 48 }).catch(() => {});
+      }
+      if (total(bot, RAW) === 0) {
         await fish(bot, task, { count: 2 }).catch(() => {});
       }
     }

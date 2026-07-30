@@ -35,6 +35,7 @@ import { equipWeapon, bestWeapon, bestAxeWeapon, bestSword, equipNamed } from '.
 import { mem } from '../world/memory.js';
 import { params, paramSource, sanitise } from './params.js';
 import { aimSolution, hasClearShot, ARROW_SPEED } from './ranged.js';
+import { FLYING } from '../world/scan.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -377,6 +378,20 @@ export class CombatEngine {
   async fight(target, { timeoutMs = 90000, pursue = true } = {}) {
     if (!target) return { ok: false, reason: 'no target' };
     const bot = this.bot;
+
+    /**
+     * Refuse an unwinnable chase up front rather than discovering it 26 seconds later.
+     * A flying mob with no bow in her pack is not a fight she can have.
+     */
+    if (FLYING.has(target.name)) {
+      const hasArrows =
+        bot.inventory.items().some((i) => i.name === 'bow' || i.name === 'crossbow') &&
+        bot.inventory.items().some((i) => /arrow/.test(i.name));
+      if (!hasArrows) {
+        return { ok: false, reason: `${target.name} flies and she has no bow — not chasing it` };
+      }
+      return this.shoot(target, { shots: 4 });
+    }
 
     if (target.name === 'creeper') {
       this.active = true;

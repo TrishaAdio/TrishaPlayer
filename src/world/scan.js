@@ -13,6 +13,19 @@ export const NEUTRAL = new Set(['piglin', 'enderman', 'zombified_piglin', 'bee',
 
 export const FOOD_ANIMALS = new Set(['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']);
 
+/**
+ * Mobs a ground-bound player cannot chase.
+ *
+ * Phantoms wrecked an entire session: one drifting 6.8m overhead triggered
+ * self-defence, cancelled her tree-chopping, and she pursued something that simply
+ * flew away — 'attack -> FAILED: target escaped', then damage taken, then a retreat at
+ * low health, then starvation because she never finished gathering. They were also the
+ * unexplained health drain in the run before that.
+ *
+ * Melee against these is not a fight, it is a distraction with a damage cost.
+ */
+export const FLYING = new Set(['phantom', 'ghast', 'blaze', 'vex', 'bat', 'allay', 'bee', 'ender_dragon', 'wither']);
+
 export const DANGER_BLOCKS = new Set(['lava', 'flowing_lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'sweet_berry_bush', 'wither_rose', 'cactus', 'powder_snow', 'pointed_dripstone']);
 
 const NEIGHBOURS = [

@@ -21,7 +21,7 @@ import { personaCore, personaBrief, CHAT_RULES } from './persona.js';
 import { actionCatalogue, isValidAction } from '../actions.js';
 import { currentRung, ladderProgress } from '../progression.js';
 import { fastParse, llmParse, smallTalk, addressedToHer, looksLikeQuestion } from '../chat/commands.js';
-import { nearbyEntities } from '../world/scan.js';
+import { nearbyEntities, FLYING } from '../world/scan.js';
 import { makePlan, fallbackPlan } from './planner.js';
 
 export class Brain {
@@ -711,6 +711,8 @@ export class Brain {
         await this.handleFailure(next, result);
       } else {
         this._retried = null;
+        // It worked — forget any strikes against it.
+        this.clearCriticalStrikes(next.name);
       }
 
       if (!this.plan.length && this.order) {
@@ -837,25 +839,44 @@ export class Brain {
   allowCritical(action) {
     const now = Date.now();
     this._critGate = this._critGate || new Map();
-    const g = this._critGate.get(action.name) || { count: 0, first: now, mutedUntil: 0 };
+    const g = this._critGate.get(action.name) || { fails: 0, lastAt: 0, mutedUntil: 0 };
 
     if (now < g.mutedUntil) return false;
-    if (now - g.first > 20000) {
-      g.count = 0;
-      g.first = now;
-    }
-    g.count++;
 
-    if (g.count > 4) {
-      g.mutedUntil = now + 25000;
-      g.count = 0;
-      g.first = now;
+    /**
+     * Count consecutive attempts, and only forget them after a long genuine quiet
+     * period. The previous version reset the counter after 20 seconds — but the retries
+     * it was meant to catch arrived 13 seconds apart, so the count never climbed and the
+     * guard never fired. She spun on `getFood` every 13 seconds for minutes at 0 food
+     * and 4 health, exploring in circles: from RAREAURA's side, "just running, doing
+     * nothing".
+     *
+     * The window is now far wider than any plausible retry interval, and it resets on
+     * success rather than on the clock.
+     */
+    if (now - g.lastAt > 120000) g.fails = 0;
+    g.lastAt = now;
+    g.fails++;
+
+    if (g.fails > 3) {
+      g.mutedUntil = now + 60000;
+      g.fails = 0;
       this._critGate.set(action.name, g);
-      log.warn(`${action.name} kept firing without fixing anything — muting it for 25s`);
+      log.warn(`${action.name} has failed ${4} times running without fixing anything — parking it for 60s and doing something else`);
       return false;
     }
     this._critGate.set(action.name, g);
     return true;
+  }
+
+  /** An action that worked clears its strikes. */
+  clearCriticalStrikes(name) {
+    if (this._critGate?.has(name)) {
+      const g = this._critGate.get(name);
+      g.fails = 0;
+      g.mutedUntil = 0;
+      this._critGate.set(name, g);
+    }
   }
 
   /** About to die. These override everything, including his orders. */
@@ -991,6 +1012,17 @@ export class Brain {
       if (e.isPlayer) return this.targeting.score(e) > 0 && e.distance < 12;
 
       if (!e.isHostile) return false;
+
+      /**
+       * Flying mobs are only worth engaging with a bow. Chasing a phantom on foot
+       * cancels whatever she was doing, achieves nothing because it flies away, and
+       * costs health on the way. Without arrows she ignores them and keeps working;
+       * the reflex layer still shields and heals.
+       */
+      if (FLYING.has(e.name)) {
+        return hasBow && e.distance < 14;
+      }
+
       // Creepers: only pick a fight if she can do it from range, and only once.
       // Otherwise the reflex dodge handles them and she keeps her distance.
       if (e.name === 'creeper') {
