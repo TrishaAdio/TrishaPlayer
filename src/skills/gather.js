@@ -68,6 +68,8 @@ const countItem = (bot, name) => bot.inventory.items().reduce((n, i) => (i.name 
  * permanently because the retry had no pickaxe either. She is standing in an unlimited
  * supply of cobblestone: the answer is to make another one where she stands.
  */
+let lastPickaxeTry = 0;
+
 export async function ensurePickaxe(bot, task) {
   const healthy = bot.inventory.items().filter((i) => /_pickaxe$/.test(i.name) && !toolNearlyBroken(bot, i));
   if (healthy.length) {
@@ -75,6 +77,14 @@ export async function ensurePickaxe(bot, task) {
     if (toolNearlyBroken(bot)) await bot.equip(healthy[0], 'hand').catch(() => {});
     return true;
   }
+
+  /**
+   * Do not retry several times a second, and do not shout about it either. This was
+   * called from every iteration of the mining loop and logged "making a fresh
+   * stone_pickaxe on the spot" five times in eleven seconds while failing each time.
+   */
+  if (Date.now() - lastPickaxeTry < 15000) return false;
+  lastPickaxeTry = Date.now();
   const tier = countItem(bot, 'cobblestone') >= 3 ? 'stone_pickaxe' : 'wooden_pickaxe';
   log.act(`[tools] pickaxe nearly spent — making a fresh ${tier} on the spot`);
   const { craft } = await import('./craft.js');
@@ -172,8 +182,19 @@ export async function digBlock(bot, task, block, { safety = true, harvest = true
       }
       if (!need[bot.heldItem?.type]) {
         bot._miningNow = false;
-        log.warn(`${block.name} needs a proper tool — a fist breaks it but drops nothing. skipping.`);
-        blacklist(block.position, 20000);
+        /**
+         * DO NOT BLACKLIST THE BLOCK. Her tool is the problem, not the position.
+         *
+         * This cost an entire live run. Both her stone pickaxes wore out at Y=8, and from
+         * then on every iron ore she walked up to was refused here AND blacklisted for
+         * 20 seconds — so `branchMine` reported "0x iron_ore" after 490 seconds of
+         * tunnelling through ore it had itself marked as unmineable. The ore was fine.
+         *
+         * A missing tool is a fact about her inventory and is recorded there, so the
+         * caller can go and fix the real cause.
+         */
+        bot._needsToolFor = block.name;
+        log.warn(`${block.name} needs a proper tool — a fist breaks it but drops nothing. skipping (not blacklisting).`);
         return false;
       }
     }
@@ -771,7 +792,30 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
     mem.addWaypoint(`mine_y${targetY}`, bot.entity.position);
   }
 
+  /**
+   * FAIL FAST IF SHE CANNOT ACTUALLY HARVEST THE TARGET.
+   *
+   * Without this the trip runs its full course achieving nothing: a live run spent 490
+   * seconds underground with no usable pickaxe and came back with zero ore. Twenty
+   * seconds and a clear `needsTool` lets the layer above craft one on the surface, where
+   * the wood is.
+   */
+  const sampleOre = bot.mcData.blocksByName[names[0]];
+  if (sampleOre?.harvestTools) {
+    const canHarvest = () => bot.inventory.items().some((i) => sampleOre.harvestTools[i.type] && !toolNearlyBroken(bot, i));
+    if (!canHarvest() && !(await ensurePickaxe(bot, task))) {
+      return {
+        ok: false,
+        got: 0,
+        reason: `no usable pickaxe for ${names[0]} — cannot mine it by hand`,
+        needsTool: 'stone_pickaxe',
+      };
+    }
+  }
+
   log.act(`branch mining for ${ore} at Y=${targetY}`);
+  let lastOreAt = Date.now();
+  const BARREN_MS = 150000;
   const yaw = bot.entity.yaw;
   let dir = new Vec3(-Math.round(Math.sin(yaw)), 0, -Math.round(Math.cos(yaw)));
   if (dir.x === 0 && dir.z === 0) dir = new Vec3(1, 0, 0);
@@ -784,6 +828,21 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
       return { ok: got > 0, detail: `${got} ${ore}, out of pickaxes`, got, needsTool: 'stone_pickaxe' };
     }
 
+    /**
+     * Barren ground is a reason to change plan, not to keep digging.
+     *
+     * 490 seconds of tunnelling for nothing is not persistence, it is a loop. Report it
+     * so the rung retries somewhere else instead of grinding the same dead seam.
+     */
+    if (got === 0 && Date.now() - lastOreAt > BARREN_MS) {
+      return {
+        ok: false,
+        got: 0,
+        detail: `no ${ore} found in ${Math.round(BARREN_MS / 1000)}s at Y=${Math.round(bot.entity.position.y)}`,
+        reason: `no ${ore} anywhere in this seam — try a different area or depth`,
+      };
+    }
+
     // Look around for anything worth a detour.
     const found = bot.findBlocks({ matching: valuable, maxDistance: 14, count: 8 });
     for (const pos of found) {
@@ -793,7 +852,10 @@ export async function branchMine(bot, task, { targetY = 16, ore = 'iron_ore', co
       if (lavaCaution && !isSafeToDig(bot, b)) continue;
       const wanted = names.includes(b.name);
       const mined = await mineVein(bot, task, b, { max: 16 });
-      if (mined && wanted) got += mined;
+      if (mined && wanted) {
+        got += mined;
+        lastOreAt = Date.now();
+      }
       if (mined) {
         const p = bot.entity.position;
         task.beat(
