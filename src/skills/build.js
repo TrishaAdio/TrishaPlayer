@@ -109,12 +109,63 @@ async function ensureBlocks(bot, task, needed) {
   return have() >= Math.min(needed, 16);
 }
 
+/** Blocks a bare fist can actually break and collect. */
+const HAND_BREAKABLE = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mycelium|sand|red_sand|gravel|clay|mud|snow_block|moss_block|soul_sand)$/;
+
+/**
+ * BARE-HANDS PANIC HOLE.
+ *
+ * The shelter she actually needs is the one she needs straight after dying: no pickaxe,
+ * no blocks, a zombie already hitting her. `ensureBlocks` tried to MINE STONE, which
+ * drops nothing without a pickaxe, so shelter returned "walled in with 1 blocks" in
+ * 0.0 seconds and she stood there being eaten to death.
+ *
+ * Dirt and gravel break by hand. Two blocks down, pull the lid over, wait it out.
+ */
+async function panicHole(bot, task) {
+  const startY = bot.entity.position.y;
+
+  for (let i = 0; i < 2; i++) {
+    task.check();
+    const feet = bot.entity.position.floored();
+    const under = bot.blockAt(feet.offset(0, -1, 0));
+    if (!under || !HAND_BREAKABLE.test(under.name)) break;
+    if (!(await digBlock(bot, task, under))) break;
+    await task.sleep(450); // let her drop into it
+  }
+
+  const now = bot.entity.position.floored();
+  if (bot.entity.position.y >= startY - 0.5) return false; // never got down
+
+  // The lid goes two above her feet, leaving her a head-height pocket. The dirt she
+  // just dug is usually what seals it.
+  const lid = ['dirt', 'coarse_dirt', 'grass_block', 'gravel', 'sand', ...WALL_MATS];
+  if (await placeAt(bot, task, now.offset(0, 2, 0), lid)) {
+    mem.set('shelterBuilt', true);
+    mem.addWaypoint('shelter', now);
+    log.act(`dug in bare-handed at ${now.x},${now.y},${now.z} and pulled the lid over`);
+    return true;
+  }
+  return false;
+}
+
 /**
  * Emergency shelter. Fast, cheap, mob-proof. Preference is to burrow into
  * terrain and seal the hole — cheaper and safer than a freestanding box.
  */
 export async function shelter(bot, task, {} = {}) {
   log.act('building shelter');
+
+  /**
+   * No tools and nothing to build with: go straight underground. Trying to gather
+   * stone first is what wasted the only seconds she had.
+   */
+  const onHand = () => WALL_MATS.reduce((n, m) => n + count(bot, m), 0);
+  const hasPick = bot.inventory.items().some((i) => /_pickaxe$/.test(i.name));
+  if (onHand() < 4 && !hasPick) {
+    if (await panicHole(bot, task)) return { ok: true, detail: 'dug in bare-handed' };
+  }
+
   await ensureBlocks(bot, task, 14);
 
   const p = bot.entity.position.floored();
@@ -154,8 +205,14 @@ export async function shelter(bot, task, {} = {}) {
   const floor = bot.blockAt(p.offset(0, -1, 0));
   if (!floor || floor.boundingBox !== 'block') await placeAt(bot, task, p.offset(0, -1, 0), WALL_MATS);
 
-  mem.set('shelterBuilt', placed > 4);
-  return { ok: placed > 4, detail: `walled in with ${placed} blocks` };
+  if (placed > 4) {
+    mem.set('shelterBuilt', true);
+    return { ok: true, detail: `walled in with ${placed} blocks` };
+  }
+
+  // Boxing in failed — get under the ground instead of standing in the open.
+  if (await panicHole(bot, task)) return { ok: true, detail: 'dug in bare-handed' };
+  return { ok: false, detail: `walled in with ${placed} blocks`, reason: 'nothing to build with and no soft ground to dig' };
 }
 
 /**

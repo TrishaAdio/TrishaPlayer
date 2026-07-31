@@ -601,6 +601,8 @@ export class Brain {
       this.plan = [{ name: 'attack', args: { target: threat.username || threat.name || 'nearest', timeoutMs: 30000 } }];
       // Keep his orders; ladder work re-derives itself.
       if (this.order) this.plan.push(...remaining);
+      // Fighting is an interruption of the rung, not evidence the rung is impossible.
+      this._rungInterrupted = true;
       this.executor.cancel('defending myself');
     }, INTERVAL);
     this._defenceTimer.unref?.();
@@ -714,7 +716,11 @@ export class Brain {
     const critical = this.criticalEmergency();
     if (critical && this.allowCritical(critical)) {
       log.brain(`critical: ${critical.name}`);
-      await this.executor.run(critical);
+      // An emergency preempting ladder work is an interruption, not a rung failure.
+      this._rungInterrupted = true;
+      const res = await this.executor.run(critical);
+      // Remember a failed wall-up so the defenceless branch can run instead of standing.
+      if (critical.name === 'shelter' && !res.ok) this._shelterFailedAt = Date.now();
       return;
     }
 
@@ -831,9 +837,24 @@ export class Brain {
       if (!this.plan.length && this.currentRungId && this.ladderActive()) {
         const still = currentRung(bot, this.ctx());
         if (still && still.id === this.currentRungId) {
-          const n = (this.rungFailures.get(still.id) || 0) + 1;
-          this.rungFailures.set(still.id, n);
-          log.brain(`rung ${still.id} still unsatisfied after a full attempt (${n}/3)`);
+          /**
+           * AN INTERRUPTION IS NOT A FAILURE.
+           *
+           * A zombie wandered up during `mining_kit`, self-defence cancelled the plan
+           * four times, and the counter read that as four failed attempts — so an
+           * optional rung got parked and she went down the mine with no wood, no sticks
+           * and no spare pickaxes. She was dead ten seconds into the iron rung.
+           *
+           * Being attacked says nothing about whether the objective is achievable.
+           */
+          if (this._rungInterrupted) {
+            this._rungInterrupted = false;
+            log.debug(`rung ${still.id} was interrupted, not failed — not counting it`);
+          } else {
+            const n = (this.rungFailures.get(still.id) || 0) + 1;
+            this.rungFailures.set(still.id, n);
+            log.brain(`rung ${still.id} still unsatisfied after a full attempt (${n}/3)`);
+          }
         } else if (this.currentRungId) {
           /**
            * The rung changed — but forward or backward? A regression matters far more
@@ -1109,6 +1130,13 @@ export class Brain {
        * the same mob. Holding position keeps reflexes and real emergencies live while
        * refusing to resume ladder work through a zombie.
        */
+      /**
+       * If walling up just failed, RUN. Standing on the spot re-issuing a shelter that
+       * cannot succeed is how she died with a zombie hitting her once a second.
+       */
+      if (this._shelterFailedAt && Date.now() - this._shelterFailedAt < 30000) {
+        return { name: 'flee', args: { from: closeHostiles[0]?.name || 'nearest', distance: 24 } };
+      }
       if (this._shelteredAt && Date.now() - this._shelteredAt < 90000) {
         this.holdUntil = Date.now() + 15000;
         return null;
@@ -1510,6 +1538,10 @@ Rules:
 
   // ───────────────────────── events ─────────────────────────
   onDeath() {
+    // Dying interrupted whatever rung she was on; it did not prove it impossible.
+    this._rungInterrupted = true;
+    this._shelteredAt = 0;
+    this._shelterFailedAt = 0;
     // A death invalidates the plan: she is somewhere else now, with nothing on her.
     this.sessionPlan = null;
     this._lastPlanAt = 0;
