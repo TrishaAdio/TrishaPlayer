@@ -104,15 +104,41 @@ export async function forageCrops(bot, task, { radius = 40 } = {}) {
   let picked = 0;
   for (const pos of found.slice(0, 14)) {
     task.check();
-    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 12000 });
+    /**
+     * Keep out of the bush. Range 3 and the safe movement profile, which refuses to route
+     * through anything in the avoid list — a berry patch is wall-to-wall damage.
+     */
+    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 3, timeoutMs: 12000, safeMode: true });
     if (!res.ok) continue;
     const b = bot.blockAt(pos);
     if (!b) continue;
     if (b.name === 'sweet_berry_bush') {
-      try {
-        await bot.activateBlock(b);
-        picked++;
-      } catch {}
+      /**
+       * BREAK IT, DO NOT WADE INTO IT.
+       *
+       * Walking into a sweet berry bush deals damage on every step, and it killed her
+       * twice — the second time holding 22 berries she had just finished picking:
+       *   20:21:19  Trisha was poked to death by a sweet berry bush
+       * Breaking the bush from arm's length drops the same berries and removes the hazard
+       * instead of leaving a minefield she has to keep walking through.
+       */
+      if (await digBlock(bot, task, b, { safety: false, harvest: false })) picked++;
+      else {
+        try {
+          await bot.activateBlock(b);
+          picked++;
+        } catch {}
+      }
+      // Berries are food. If that hurt, eat before reaching for the next bush.
+      if (bot.health < 14) {
+        const berry = bot.inventory.items().find((i) => i.name === 'sweet_berries');
+        if (berry) {
+          try {
+            await bot.equip(berry, 'hand');
+            await bot.consume();
+          } catch {}
+        }
+      }
     } else if (await digBlock(bot, task, b, { safety: false })) picked++;
   }
   await collectDrops(bot, task, { radius: 8, quiet: true });
