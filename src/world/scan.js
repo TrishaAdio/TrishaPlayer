@@ -141,6 +141,24 @@ export function findBlocks(bot, names, { maxDistance = 48, count = 16 } = {}) {
   return bot.findBlocks({ matching: ids, maxDistance, count });
 }
 
+/**
+ * Is there solid rock over her head?
+ *
+ * A Y threshold is a bad proxy for "underground" and it cost her real time: standing on
+ * a hillside at Y=54 she was repeatedly told to "surface first" because the check was
+ * `y < 55`, so she burned an entire food search climbing to a surface she was already on.
+ * What matters is whether anything is between her and the sky.
+ */
+export function isUnderground(bot, checkUp = 40) {
+  const p = bot.entity?.position?.floored();
+  if (!p) return false;
+  for (let dy = 2; dy <= checkUp; dy++) {
+    const b = bot.blockAt(p.offset(0, dy, 0));
+    if (b && b.boundingBox === 'block') return true;
+  }
+  return false;
+}
+
 /** Light level where she's standing — low light means mobs will spawn. */
 export function lightHere(bot) {
   const b = bot.blockAt(bot.entity.position.floored());

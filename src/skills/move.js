@@ -92,6 +92,10 @@ export function installMovement(bot) {
   safe.allow1by1towers = false;
   safe.maxDropDown = 2;
   safe.allowParkour = false;
+  // The safe profile was missing the water penalty, so "flee safely" could still route
+  // her across a lake. She drowned twice on the surface.
+  if ('liquidCost' in safe) safe.liquidCost = 60;
+  safe.dontCreateFlow = true;
   for (const name of AVOID) {
     const b = mcData.blocksByName[name];
     if (b) safe.blocksToAvoid.add(b.id);
