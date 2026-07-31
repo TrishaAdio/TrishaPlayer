@@ -274,7 +274,18 @@ export const LADDER = [
      * wall the ladder; genuine starvation is a reflex-layer emergency anyway.
      */
     optional: true,
-    done: (bot) => foodCount(bot) >= 8 || foodCount(bot) + rawMeatCount(bot) >= 12,
+    /**
+     * A full belly plus a few spares is ready for a mining trip.
+     *
+     * Demanding a standing stock of 8 made this rung fight its own purpose: she cooks
+     * food, eats it, drops under the bar, and forages again — the live VPS run bounced
+     * food_security twice. Food is for eating; what matters is that she is not hungry and
+     * has something in reserve.
+     */
+    done: (bot) =>
+      foodCount(bot) >= 8 ||
+      foodCount(bot) + rawMeatCount(bot) >= 12 ||
+      (bot.food >= 18 && foodCount(bot) + rawMeatCount(bot) >= 4),
     actions: () => [
       { name: 'forageFood', args: { target: 10 } },
       { name: 'smelt', args: { item: 'cooked_beef', count: 8, any: 'meat' } },
