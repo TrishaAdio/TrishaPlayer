@@ -109,6 +109,19 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
   const startRaw = total(bot, RAW);
   log.act(`getting food (has ${startCooked} cooked, ${startRaw} raw, wants ${target})`);
 
+  /**
+   * NOTHING GROWS AT Y=30.
+   *
+   * She ran out of food part way down a mine shaft and then hunted for cows in a tunnel,
+   * failing five attempts in a row while starving. Animals, crops and berries are all on
+   * the surface, so the first move when hungry underground is to climb.
+   */
+  if (bot.entity.position.y < 55) {
+    const { ascendToSurface } = await import('./move.js');
+    log.act(`hungry at Y=${Math.round(bot.entity.position.y)} — surfacing first, nothing edible grows down here`);
+    await ascendToSurface(bot, task, { targetY: 63, timeoutMs: 60000 }).catch(() => {});
+  }
+
   if (urgent) {
     // Starving: eat literally anything, sort quality out later.
     const anyRaw = total(bot, RAW);

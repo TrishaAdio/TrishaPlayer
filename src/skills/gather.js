@@ -713,6 +713,7 @@ export async function collectDrops(bot, task, { radius = 12, quiet = false } = {
 export async function digDown(bot, task, { toY = 16, staircase = true } = {}) {
   log.act(`descending to Y=${toY}`);
   let guard = 0;
+  let turns = 0;
   const yaw = bot.entity.yaw;
   let dir = new Vec3(-Math.round(Math.sin(yaw)), 0, -Math.round(Math.cos(yaw)));
   if (dir.x === 0 && dir.z === 0) dir = new Vec3(1, 0, 0);
@@ -728,6 +729,19 @@ export async function digDown(bot, task, { toY = 16, staircase = true } = {}) {
       continue;
     }
 
+    /**
+     * ALREADY WET? STOP DIGGING AND GET OUT.
+     *
+     * She staircased into an aquifer and the log read "panic: drowning" while health
+     * fell from 20 to 13. Digging deeper inside water is how that ends badly.
+     */
+    if (bot.entity?.isInWater) {
+      log.reflex('water in the shaft — backing out rather than digging deeper');
+      const { ascendToSurface } = await import('./move.js');
+      await ascendToSurface(bot, task, { targetY: Math.round(bot.entity.position.y) + 10, timeoutMs: 30000 }).catch(() => {});
+      return { ok: false, reason: 'hit water on the way down' };
+    }
+
     // One step of staircase: clear head, body, and the step down.
     const step = p.plus(dir).offset(0, -1, 0);
     const targets = [p.plus(dir).offset(0, 1, 0), p.plus(dir), step];
@@ -735,24 +749,50 @@ export async function digDown(bot, task, { toY = 16, staircase = true } = {}) {
     let blocked = false;
     for (const t of targets) {
       const b = bot.blockAt(t);
-      if (!b || b.boundingBox === 'empty') continue;
-      if (/lava/.test(b.name)) {
+      if (!b) continue;
+      /**
+       * WATER IS NOT AIR.
+       *
+       * This is the bug that drowned her. Water's boundingBox is 'empty', so the old
+       * `if (b.boundingBox === 'empty') continue` skipped straight past a water block as
+       * though it were a clear cell — and she walked her staircase directly into an
+       * aquifer. Fluids have to be checked BEFORE emptiness.
+       */
+      if (/lava|water/.test(b.name)) {
         blocked = true;
         break;
       }
+      if (b.boundingBox === 'empty') continue;
       if (!(await digBlock(bot, task, b))) {
         blocked = true;
         break;
       }
     }
 
+    // Peek at the cell she is about to occupy: a hidden pocket of water one block on
+    // is still a drowning risk once she breaks into it.
+    if (!blocked) {
+      for (const off of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]) {
+        const n = bot.blockAt(step.offset(off[0], off[1], off[2]));
+        if (n && /water|lava/.test(n.name)) {
+          blocked = true;
+          log.reflex(`fluid behind the shaft wall at ${step.x},${step.y},${step.z} — turning`);
+          break;
+        }
+      }
+    }
+
     if (blocked) {
       // Turn 90 degrees and keep going rather than forcing it.
       dir = new Vec3(-dir.z, 0, dir.x);
-      log.reflex('lava or bedrock ahead, turning');
+      turns++;
+      log.reflex('fluid or bedrock ahead, turning');
+      // Boxed in on every bearing: stop rather than spinning on the spot.
+      if (turns >= 8) return { ok: false, reason: `blocked on every side at Y=${Math.round(bot.entity.position.y)}` };
       await task.sleep(200);
       continue;
     }
+    turns = 0;
 
     const res = await goTo(bot, task, step.x, step.y, step.z, { range: 0, timeoutMs: 10000 });
     if (!res.ok) {
