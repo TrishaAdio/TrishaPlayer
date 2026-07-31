@@ -154,7 +154,16 @@ export function isUnderground(bot, checkUp = 40) {
   if (!p) return false;
   for (let dy = 2; dy <= checkUp; dy++) {
     const b = bot.blockAt(p.offset(0, dy, 0));
-    if (b && b.boundingBox === 'block') return true;
+    if (!b || b.boundingBox !== 'block') continue;
+    /**
+     * A CANOPY IS NOT A CEILING.
+     *
+     * Standing in a forest at Y=70 she was told "hungry and underground — surfacing
+     * first" and set off to climb 25 blocks, because leaves report a solid bounding box.
+     * Trees, snow layers and vines do not put rock over her head.
+     */
+    if (/leaves|_log$|_wood$|snow|vine|bamboo|mushroom_block|cocoa|shroomlight/.test(b.name)) continue;
+    return true;
   }
   return false;
 }
