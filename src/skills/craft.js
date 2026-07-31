@@ -546,7 +546,20 @@ export async function ensureFurnace(bot, task) {
     item = findItem(bot, 'furnace');
   }
   if (!item) return null;
-  return placeSupportBlock(bot, task, item);
+  const placed = await placeSupportBlock(bot, task, item);
+  if (placed) {
+    /**
+     * Remember it, exactly like the bench.
+     *
+     * Placing the furnace takes it out of her inventory, and the stone_tools rung asked
+     * whether she OWNED one — so smelting un-did the rung and the ladder bounced
+     * stone_tools -> food_security -> stone_tools on a live run. A furnace she built and
+     * can walk back to is a furnace she has.
+     */
+    mem.addWaypoint('furnace', placed.position);
+    log.act(`furnace set up at ${placed.position.x},${placed.position.y},${placed.position.z}`);
+  }
+  return placed;
 }
 
 /**

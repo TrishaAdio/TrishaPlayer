@@ -243,8 +243,10 @@ export const LADDER = [
      * cobblestone is a furnace whenever she wants one (ensureFurnace builds it on
      * demand).
      */
-    done: (bot) =>
-      pickTier(bot) >= 2 && swordTier(bot) >= 2 && (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8),
+    done: (bot, ctx) =>
+      pickTier(bot) >= 2 &&
+      swordTier(bot) >= 2 &&
+      (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8 || !!ctx.memory.all.waypoints?.furnace),
     actions: () => [
       /**
        * TWO pickaxes, deliberately.
