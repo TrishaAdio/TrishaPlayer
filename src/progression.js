@@ -301,7 +301,13 @@ export const LADDER = [
      * is normal, and branch mining picks coal up on the way down regardless.
      */
     optional: true,
-    done: (bot) => ownedCount(bot, 'torch') >= 16,
+    /**
+     * Torches are for PLACING. Gating on 16 held meant she made 16, put one down while
+     * sheltering, dropped to 15 and was sent back to chop more wood for sticks — the
+     * live run bounced torches -> shelter -> torches. Eight in the pack is plenty to
+     * start a mining trip, and a stack of coal means she can always make more.
+     */
+    done: (bot) => ownedCount(bot, 'torch') >= 8 || (count(bot, 'coal') >= 6 && count(bot, 'stick') >= 4),
     /**
      * A torch is coal AND a stick. She reached this rung holding 27 coal and zero logs,
      * so every craft failed on "need 1x stick" — the wood has to be part of the rung.
