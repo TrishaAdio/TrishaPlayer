@@ -337,6 +337,7 @@ export class Brain {
     this.tickLoop();
     this.defenceWatch();
     this.stuckWatch();
+    this.survivalWatch();
   }
 
   /**
@@ -511,6 +512,42 @@ export class Brain {
     this._stuckTimer.unref?.();
   }
 
+  /**
+   * LIFE-THREATENING CONDITIONS MUST BE ABLE TO INTERRUPT WORK.
+   *
+   * `step()` returns early whenever the executor is busy, so a critical emergency could
+   * never fire while a long action was running. Observed live: she branch-mined at
+   * <b>1 HP with 0 food</b> for several minutes, because branchMine held the executor and
+   * nothing in the design was allowed to stop it. The defence watcher already existed for
+   * exactly this reason but only covers hostiles, not starvation or bleeding out.
+   *
+   * This runs on its own timer, like defenceWatch, and only for genuinely lethal states.
+   */
+  survivalWatch() {
+    this._survivalTimer = setInterval(() => {
+      if (!this.running || this.paused || !this.bot.entity || this.bot.health == null) return;
+      if (!this.executor.busy) return;
+      const bot = this.bot;
+      const name = this.executor.currentName;
+      // Eating is not something to interrupt for hunger.
+      if (name === 'getFood' || name === 'forageFood' || name === 'eat' || name === 'heal') return;
+
+      const starving = bot.food <= 2 && !this.reflex.bestFood(true);
+      const bleedingOut = bot.health <= 6;
+      if (!starving && !bleedingOut) return;
+      if (Date.now() - (this._lastSurvivalCut || 0) < 20000) return;
+
+      this._lastSurvivalCut = Date.now();
+      log.warn(
+        `survival interrupt: hp ${Math.round(bot.health)} food ${bot.food} — stopping ${name} before it kills her`,
+      );
+      // Being pulled off a rung to survive is an interruption, not a failed objective.
+      this._rungInterrupted = true;
+      this.executor.cancel('survival emergency');
+    }, 2000);
+    this._survivalTimer.unref?.();
+  }
+
   /** Physically get her moving again: jump, sidestep, and dig out if enclosed. */
   async unstick() {
     const bot = this.bot;
@@ -612,6 +649,7 @@ export class Brain {
     this.running = false;
     if (this._defenceTimer) clearInterval(this._defenceTimer);
     if (this._stuckTimer) clearInterval(this._stuckTimer);
+    if (this._survivalTimer) clearInterval(this._survivalTimer);
   }
 
   async tickLoop() {
