@@ -55,9 +55,10 @@ export async function butcher(bot, task, { animal = 'any', count: want = 2 } = {
       misses++;
       // One look around, then give up. Wandering the map for livestock is what made
       // her look aimless.
-      if (misses > 1) return { ok: killed > 0, detail: `killed ${killed}`, got: killed, reason: 'no animals anywhere nearby' };
+      // Two looks, not one. Livestock is patchy and a single bearing is a coin flip.
+      if (misses > 2) return { ok: killed > 0, detail: `killed ${killed}`, got: killed, reason: 'no animals anywhere nearby' };
       const { explore } = await import('./move.js');
-      await explore(bot, task, { radius: 40 }).catch(() => {});
+      await explore(bot, task, { radius: 56, reason: 'hunting for livestock' }).catch(() => {});
       continue;
     }
 
@@ -166,6 +167,39 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
       if (total(bot, RAW) === 0) {
         await fish(bot, task, { count: 2 }).catch(() => {});
       }
+
+      /**
+       * LAST RESORT: EAT WHAT IS ACTUALLY ATTACKING HER.
+       *
+       * Three of her deaths were zombies and this world has almost no livestock near
+       * spawn, so "no animals nearby" kept being the honest answer while a food source
+       * walked up to her every night. Rotten flesh is poor food and it is far better than
+       * starving — which is what actually killed her.
+       */
+      if (total(bot, EDIBLE) === 0) {
+        const { hostilesNear } = await import('../world/scan.js');
+        const mobs = hostilesNear(bot, 16).filter((e) => /zombie|husk|drowned/.test(e.name));
+        if (mobs.length) {
+          log.act(`nothing to eat and ${mobs.length} zombie(s) nearby — taking the flesh instead`);
+          await equipWeapon(bot).catch(() => {});
+          for (const m of mobs.slice(0, 2)) {
+            task.check();
+            const e = m.entity;
+            if (!e || !bot.entities[e.id]) continue;
+            await goTo(bot, task, e.position.x, e.position.y, e.position.z, { range: 2, timeoutMs: 12000 }).catch(() => {});
+            for (let swing = 0; swing < 12 && bot.entities[e.id]; swing++) {
+              task.check();
+              await bot.lookAt(e.position.offset(0, 1, 0), true).catch(() => {});
+              await bot.attack(e).catch(() => {});
+              await task.sleep(600);
+            }
+          }
+          await collectDrops(bot, task, { radius: 10, quiet: true }).catch(() => {});
+        }
+      }
+
+      // Anything already on the ground nearby counts — drops from fights she has had.
+      if (total(bot, EDIBLE) === 0) await collectDrops(bot, task, { radius: 12, quiet: true }).catch(() => {});
     }
     const got = total(bot, EDIBLE);
     return got > 0
