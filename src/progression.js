@@ -283,68 +283,12 @@ export const LADDER = [
      * has something in reserve.
      */
     done: (bot) =>
-      foodCount(bot) >= 8 ||
-      foodCount(bot) + rawMeatCount(bot) >= 12 ||
-      (bot.food >= 18 && foodCount(bot) + rawMeatCount(bot) >= 4),
+      foodCount(bot) >= 6 ||
+      foodCount(bot) + rawMeatCount(bot) >= 10 ||
+      (bot.food >= 14 && foodCount(bot) + rawMeatCount(bot) >= 3),
     actions: () => [
       { name: 'forageFood', args: { target: 10 } },
       { name: 'smelt', args: { item: 'cooked_beef', count: 8, any: 'meat' } },
-    ],
-  },
-  {
-    id: 'torches',
-    label: 'coal and torches',
-    /**
-     * `|| count(coal) === 0` made this rung true the instant she spawned, so she was
-     * sent down to mine iron with no light at all — which is how most of the deaths
-     * happened. Now it is a real objective, but an optional one: no coal on the surface
-     * is normal, and branch mining picks coal up on the way down regardless.
-     */
-    optional: true,
-    /**
-     * Torches are for PLACING. Gating on 16 held meant she made 16, put one down while
-     * sheltering, dropped to 15 and was sent back to chop more wood for sticks — the
-     * live run bounced torches -> shelter -> torches. Eight in the pack is plenty to
-     * start a mining trip, and a stack of coal means she can always make more.
-     */
-    done: (bot) => ownedCount(bot, 'torch') >= 8 || (count(bot, 'coal') >= 6 && count(bot, 'stick') >= 4),
-    /**
-     * A torch is coal AND a stick. She reached this rung holding 27 coal and zero logs,
-     * so every craft failed on "need 1x stick" — the wood has to be part of the rung.
-     */
-    actions: (bot) => [
-      ...(logs(bot) + Math.floor(planks(bot) / 4) < 2 ? [{ name: 'chopWood', args: { count: 6 } }] : []),
-      { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true } },
-      { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
-      { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
-    ],
-  },
-  {
-    id: 'shelter',
-    label: 'a safe place to log off',
-    done: (bot, ctx) => !!ctx.memory.all.bed || !!ctx.memory.all.shelterBuilt,
-    actions: () => [{ name: 'shelter', args: {} }],
-  },
-  {
-    id: 'bed',
-    label: 'wool, a bed, and a way to skip the night',
-    /**
-     * A real rung of its own. The old version tacked an optional bed craft onto the
-     * shelter rung, which never fired because 3 wool is not something she happens to
-     * be carrying — so she spent every night awake being shot at. Sheep first, then
-     * the bed, then actually sleep in it.
-     */
-    /**
-     * Optional. A biome with no sheep made this unsatisfiable, and because it sits
-     * before the iron rung it walled the entire ladder off — she retried getWool
-     * forever and never mined a single ore. A bed is a comfort, not a prerequisite.
-     */
-    optional: true,
-    done: (bot, ctx) => !!ctx.memory.all.bed || countAny(bot, ...BED_NAMES) > 0 || owns(bot, 'white_bed'),
-    actions: () => [
-      { name: 'getWool', args: { count: 3 } },
-      { name: 'craft', args: { item: 'white_bed', count: 1, optional: true } },
-      { name: 'placeBed', args: {} },
     ],
   },
   {
@@ -423,6 +367,62 @@ export const LADDER = [
       { name: 'craft', args: { item: 'iron_boots', count: 1 } },
       { name: 'craft', args: { item: 'shield', count: 1 } },
       { name: 'equipBest', args: {} },
+    ],
+  },
+  {
+    id: 'torches',
+    label: 'coal and torches',
+    /**
+     * `|| count(coal) === 0` made this rung true the instant she spawned, so she was
+     * sent down to mine iron with no light at all — which is how most of the deaths
+     * happened. Now it is a real objective, but an optional one: no coal on the surface
+     * is normal, and branch mining picks coal up on the way down regardless.
+     */
+    optional: true,
+    /**
+     * Torches are for PLACING. Gating on 16 held meant she made 16, put one down while
+     * sheltering, dropped to 15 and was sent back to chop more wood for sticks — the
+     * live run bounced torches -> shelter -> torches. Eight in the pack is plenty to
+     * start a mining trip, and a stack of coal means she can always make more.
+     */
+    done: (bot) => ownedCount(bot, 'torch') >= 8 || (count(bot, 'coal') >= 6 && count(bot, 'stick') >= 4),
+    /**
+     * A torch is coal AND a stick. She reached this rung holding 27 coal and zero logs,
+     * so every craft failed on "need 1x stick" — the wood has to be part of the rung.
+     */
+    actions: (bot) => [
+      ...(logs(bot) + Math.floor(planks(bot) / 4) < 2 ? [{ name: 'chopWood', args: { count: 6 } }] : []),
+      { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true } },
+      { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
+      { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
+    ],
+  },
+  {
+    id: 'shelter',
+    label: 'a safe place to log off',
+    done: (bot, ctx) => !!ctx.memory.all.bed || !!ctx.memory.all.shelterBuilt,
+    actions: () => [{ name: 'shelter', args: {} }],
+  },
+  {
+    id: 'bed',
+    label: 'wool, a bed, and a way to skip the night',
+    /**
+     * A real rung of its own. The old version tacked an optional bed craft onto the
+     * shelter rung, which never fired because 3 wool is not something she happens to
+     * be carrying — so she spent every night awake being shot at. Sheep first, then
+     * the bed, then actually sleep in it.
+     */
+    /**
+     * Optional. A biome with no sheep made this unsatisfiable, and because it sits
+     * before the iron rung it walled the entire ladder off — she retried getWool
+     * forever and never mined a single ore. A bed is a comfort, not a prerequisite.
+     */
+    optional: true,
+    done: (bot, ctx) => !!ctx.memory.all.bed || countAny(bot, ...BED_NAMES) > 0 || owns(bot, 'white_bed'),
+    actions: () => [
+      { name: 'getWool', args: { count: 3 } },
+      { name: 'craft', args: { item: 'white_bed', count: 1, optional: true } },
+      { name: 'placeBed', args: {} },
     ],
   },
   {
