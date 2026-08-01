@@ -982,11 +982,14 @@ export async function branchMine(
     if (Date.now() - tripStartedAt > TRIP_LIMIT_MS) {
       return { ok: got > 0, got, detail: `${got}x ${ore} in ${Math.round((Date.now() - tripStartedAt) / 60000)}min — heading back` };
     }
-    if (inventoryFull(bot) > 0.9) {
-      // Make room rather than abandoning the trip holding a pack full of granite.
+    /**
+     * Tidy at 0.7, not 0.9. She finished a trip carrying 578 items and 319 cobblestone,
+     * which is what produced "smelt -> FAILED: destination full" later. Rubble is not loot.
+     */
+    if (inventoryFull(bot) > 0.7) {
       const { dropJunk } = await import('./storage.js');
       await dropJunk(bot, task).catch(() => {});
-      if (inventoryFull(bot) > 0.9) return { ok: true, detail: `${got} ${ore}, inventory full`, got };
+      if (inventoryFull(bot) > 0.92) return { ok: true, detail: `${got} ${ore}, inventory full`, got };
     }
     if (toolNearlyBroken(bot) && !(await ensurePickaxe(bot, task))) {
       return { ok: got > 0, detail: `${got} ${ore}, out of pickaxes`, got, needsTool: 'stone_pickaxe' };

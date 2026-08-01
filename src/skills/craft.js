@@ -757,44 +757,59 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
  */
 export async function emptyFurnace(bot, task) {
   const ids = [bot.mcData.blocksByName.furnace?.id, bot.mcData.blocksByName.blast_furnace?.id].filter((x) => x != null);
-  let block = bot.findBlock({ matching: ids, maxDistance: 16 });
 
-  if (!block) {
-    const wp = mem.all.waypoints?.furnace;
-    if (!wp) return { ok: true, detail: 'no furnace to check' };
-    const pos = new Vec3(wp.x, wp.y, wp.z);
-    if (bot.entity.position.distanceTo(pos) > 128) return { ok: true, detail: 'remembered furnace is too far' };
-    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 60000 });
-    if (!res.ok) return { ok: true, detail: 'could not get back to the furnace' };
-    block = bot.findBlock({ matching: ids, maxDistance: 6 });
-    if (!block) return { ok: true, detail: 'furnace is gone' };
-  }
-
-  if (bot.entity.position.distanceTo(block.position) > 3.2) {
-    await goTo(bot, task, block.position.x, block.position.y, block.position.z, { range: 2, timeoutMs: 30000 }).catch(() => {});
-  }
-
-  let furnace;
-  try {
-    furnace = await bot.openFurnace(block);
-  } catch (err) {
-    return { ok: true, detail: `could not open the furnace: ${err.message}` };
-  }
-  let got = 0;
-  try {
-    for (const take of ['takeOutput', 'takeInput', 'takeFuel']) {
+  const drain = async (block) => {
+    if (!block) return 0;
+    if (bot.entity.position.distanceTo(block.position) > 3.2) {
+      const res = await goTo(bot, task, block.position.x, block.position.y, block.position.z, { range: 2, timeoutMs: 30000 });
+      if (!res.ok) return 0;
+    }
+    let furnace;
+    try {
+      furnace = await bot.openFurnace(block);
+    } catch {
+      return 0;
+    }
+    let got = 0;
+    try {
+      for (const take of ['takeOutput', 'takeInput', 'takeFuel']) {
+        try {
+          const item = await furnace[take]().catch(() => null);
+          if (item) {
+            got += item.count;
+            log.act(`[furnace] recovered ${item.count}x ${item.name} at ${block.position.x},${block.position.y},${block.position.z}`);
+          }
+        } catch {}
+      }
+    } finally {
       try {
-        const item = await furnace[take]().catch(() => null);
-        if (item) {
-          got += item.count;
-          log.act(`[furnace] recovered ${item.count}x ${item.name}`);
-        }
+        furnace.close();
       } catch {}
     }
-  } finally {
-    try {
-      furnace.close();
-    } catch {}
+    return got;
+  };
+
+  let got = 0;
+
+  // 1. Anything right here.
+  got += await drain(bot.findBlock({ matching: ids, maxDistance: 16 }));
+
+  /**
+   * 2. AND the one she remembers, even if a closer one existed.
+   *
+   * Checking only the nearest furnace was not enough: she placed a second furnace to cook
+   * food, that became the nearest, and 24 raw_iron plus 9 ingots stayed locked in the first
+   * one while she went back down the mine for more.
+   */
+  const wp = mem.all.waypoints?.furnace;
+  if (wp) {
+    const pos = new Vec3(wp.x, wp.y, wp.z);
+    const already = bot.entity.position.distanceTo(pos) <= 4;
+    if (!already && bot.entity.position.distanceTo(pos) <= 160) {
+      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 90000 });
+      if (res.ok) got += await drain(bot.findBlock({ matching: ids, maxDistance: 6 }));
+    }
   }
-  return { ok: true, detail: got ? `recovered ${got} items from the furnace` : 'furnace was empty', got };
+
+  return { ok: true, detail: got ? `recovered ${got} items from furnaces` : 'furnaces were empty', got };
 }
