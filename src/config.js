@@ -96,7 +96,9 @@ export const config = {
 export function assertConfig() {
   const problems = [];
   if (!config.llm.apiKey || config.llm.apiKey.startsWith('sk-replace')) {
-    problems.push('ZEN_API_KEY is not set in .env — the brain cannot start.');
+    // Name both, because the variable was renamed and the old message sent me looking
+    // for a key that was present under the new name.
+    problems.push('LLM_API_KEY (or legacy ZEN_API_KEY) is not set in .env — the brain cannot start.');
   }
   if (!config.owner) {
     problems.push('OWNER is not set in .env — Trisha will not know who to obey.');
