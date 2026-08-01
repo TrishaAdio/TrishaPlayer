@@ -623,6 +623,17 @@ export class Brain {
         }
       }
 
+      /**
+       * NEVER PICK A FIGHT BARE-HANDED.
+       *
+       * This watcher was structurally unable to decline. An overnight run died 65 times,
+       * and the log is the same twenty lines over and over: "self defence: zombie at
+       * 4.7m", "cancelling flee (defending myself)", then twenty "swing fist" entries and
+       * a death. It cancelled her own escape to start a fight she could not win with no
+       * weapon and no armour. Leave it to criticalEmergency, which walls up or runs.
+       */
+      if (this.defenceless()) return;
+
       const threat = this.nearestThreat();
       if (!threat) return;
 
@@ -1079,6 +1090,20 @@ export class Brain {
   allowCritical(action) {
     const now = Date.now();
     this._critGate = this._critGate || new Map();
+
+    /**
+     * NEVER MUTE HER ESCAPES.
+     *
+     * The gate exists to stop a useless critical crowding out the ladder, but applying it
+     * to `flee` and `shelter` disabled the only two things that keep her alive. The
+     * overnight log is unambiguous:
+     *   flee has failed 4 times running without fixing anything — parking it for 60s
+     *   self defence: zombie at 4.7m (was flee)  ->  swing fist x20  ->  she died
+     * With escape parked and no weapon, the outcome was fixed. 81 deaths followed.
+     * Running away "not fixing anything" is not evidence that running away is wrong.
+     */
+    if ((action.name === 'flee' || action.name === 'shelter') && this.defenceless()) return true;
+
     const g = this._critGate.get(action.name) || { fails: 0, lastAt: 0, mutedUntil: 0 };
 
     if (now < g.mutedUntil) return false;
@@ -1580,6 +1605,12 @@ Rules:
     this._rungInterrupted = true;
     this._shelteredAt = 0;
     this._shelterFailedAt = 0;
+    /**
+     * A fresh life gets fresh options. Strikes accumulated before dying were muting the
+     * very actions she needed on respawn, which is how one death became eighty-one.
+     */
+    this._critGate = new Map();
+    this._futileTargets = new Map();
     // A death invalidates the plan: she is somewhere else now, with nothing on her.
     this.sessionPlan = null;
     this._lastPlanAt = 0;

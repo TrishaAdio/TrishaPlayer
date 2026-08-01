@@ -227,6 +227,20 @@ const stoneRung = LADDER.find((r) => r.id === 'stone');
 const spentCobble = makeBot([['cobblestone', 6], ['stone_pickaxe', 2], ['stone_sword', 1], ['furnace', 1]]);
 ok(stoneRung.done(spentCobble, lateCtx()), 'spending cobble on the stone kit does NOT un-do the stone rung', '6 cobble left');
 
+/**
+ * THE THREE-HOUR BUG. She held 33 ingots' worth of iron with no pickaxe and the strictly
+ * ordered ladder sent her back to `wood`, so iron_kit was never reachable. With the iron
+ * already mined, the next rung must be the one that turns it into armour.
+ */
+const ironNoTools = makeBot([['raw_iron', 33], ['oak_log', 6]]);
+const ironRung2 = currentRung(ironNoTools, lateCtx());
+ok(
+  ironRung2 && !['wood_tools', 'stone', 'stone_tools', 'mining_kit'].includes(ironRung2.id),
+  '33 iron and no pickaxe goes to the kit, not back to wooden tools',
+  `-> "${ironRung2?.id}"`,
+);
+ok(ironRung2?.id === 'iron_kit', 'and specifically to iron_kit', `-> "${ironRung2?.id}"`);
+
 // Every optional rung is genuinely marked, so an unsatisfiable one can be parked.
 const optional = LADDER.filter((r) => r.optional).map((r) => r.id);
 ok(optional.includes('bed') && optional.includes('torches'), 'rungs that a world may not support are optional', optional.join(', '));

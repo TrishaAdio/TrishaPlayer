@@ -896,6 +896,13 @@ export async function branchMine(
   log.act(`branch mining for ${ore} at Y=${targetY}`);
   let lastOreAt = Date.now();
   const BARREN_MS = 150000;
+  /**
+   * A mining trip is a trip, not a career. Progress heartbeats legitimately keep the stuck
+   * watchdog happy while tunnelling, so without an overall cap she ran one branchMine for
+   * seventeen minutes. Come back with what she has and let the ladder decide.
+   */
+  const tripStartedAt = Date.now();
+  const TRIP_LIMIT_MS = 480000;
   const yaw = bot.entity.yaw;
   let dir = new Vec3(-Math.round(Math.sin(yaw)), 0, -Math.round(Math.cos(yaw)));
   if (dir.x === 0 && dir.z === 0) dir = new Vec3(1, 0, 0);
@@ -918,7 +925,15 @@ export async function branchMine(
       return { ok: got > 0, got, detail: `${got} ${ore}, hit water and pulled out`, reason: 'flooded seam — try elsewhere' };
     }
 
-    if (inventoryFull(bot) > 0.9) return { ok: true, detail: `${got} ${ore}, inventory full`, got };
+    if (Date.now() - tripStartedAt > TRIP_LIMIT_MS) {
+      return { ok: got > 0, got, detail: `${got}x ${ore} in ${Math.round((Date.now() - tripStartedAt) / 60000)}min — heading back` };
+    }
+    if (inventoryFull(bot) > 0.9) {
+      // Make room rather than abandoning the trip holding a pack full of granite.
+      const { dropJunk } = await import('./storage.js');
+      await dropJunk(bot, task).catch(() => {});
+      if (inventoryFull(bot) > 0.9) return { ok: true, detail: `${got} ${ore}, inventory full`, got };
+    }
     if (toolNearlyBroken(bot) && !(await ensurePickaxe(bot, task))) {
       return { ok: got > 0, detail: `${got} ${ore}, out of pickaxes`, got, needsTool: 'stone_pickaxe' };
     }

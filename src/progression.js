@@ -206,8 +206,22 @@ export const LADDER = [
      * stone_tools -> wood_tools, crafting a fresh table on every lap. Owning the
      * capability is the point, not carrying the block.
      */
+    /**
+     * A WOODEN PICKAXE IS IRRELEVANT ONCE SHE IS CARRYING 33 IRON.
+     *
+     * This is the bug that cost the whole night. She reached 33/33 iron at 02:59, her
+     * stone pickaxe wore out, and because the ladder is strictly ordered it walked her
+     * backwards — stone_tools, then wood_tools, then wood — while `iron_kit` sat further
+     * down the list, unreachable. She carried the full kit's worth of iron for nearly
+     * three hours, never smelted a single ingot, then starved and lost all of it:
+     *   05:42  Death 1 - slain by Zombie, lost iron 33 -> 0
+     *
+     * Once the iron is in her pack the only sane next move is to smelt it and put the
+     * armour on. Regressing to chop a stick for a wooden pickaxe is not progress.
+     */
     done: (bot, ctx) =>
-      pickTier(bot) >= 1 && swordTier(bot) >= 1 && (owns(bot, 'crafting_table') || !!ctx.memory.all.waypoints?.bench),
+      ironSecured(bot) ||
+      (pickTier(bot) >= 1 && swordTier(bot) >= 1 && (owns(bot, 'crafting_table') || !!ctx.memory.all.waypoints?.bench)),
     actions: () => [
       { name: 'craft', args: { item: 'crafting_table', count: 1 } },
       { name: 'craft', args: { item: 'stick', count: 8 } },
@@ -229,7 +243,8 @@ export const LADDER = [
      * stone kit — which spends 16 of them — immediately un-did this rung and sent her
      * back to mine the same stone again. Owning the kit is proof the cobble was got.
      */
-    done: (bot) => count(bot, 'cobblestone') >= 22 || (pickTier(bot) >= 2 && swordTier(bot) >= 2),
+    // Cobble for a stone kit is beside the point once the iron is already mined.
+    done: (bot) => ironSecured(bot) || count(bot, 'cobblestone') >= 22 || (pickTier(bot) >= 2 && swordTier(bot) >= 2),
     actions: () => [{ name: 'mine', args: { block: 'stone', count: 26 } }],
   },
   {
@@ -244,9 +259,10 @@ export const LADDER = [
      * demand).
      */
     done: (bot, ctx) =>
-      pickTier(bot) >= 2 &&
-      swordTier(bot) >= 2 &&
-      (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8 || !!ctx.memory.all.waypoints?.furnace),
+      ironSecured(bot) ||
+      (pickTier(bot) >= 2 &&
+        swordTier(bot) >= 2 &&
+        (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8 || !!ctx.memory.all.waypoints?.furnace)),
     actions: () => [
       /**
        * TWO pickaxes, deliberately.
@@ -282,7 +298,10 @@ export const LADDER = [
      * food_security twice. Food is for eating; what matters is that she is not hungry and
      * has something in reserve.
      */
+    // Stocking food yields to the iron kit: crafting armour takes a minute, foraging took
+    // five, and `emergency_food` above still catches genuine starvation.
     done: (bot) =>
+      ironSecured(bot) ||
       foodCount(bot) >= 6 ||
       foodCount(bot) + rawMeatCount(bot) >= 10 ||
       (bot.food >= 14 && foodCount(bot) + rawMeatCount(bot) >= 3),
@@ -342,7 +361,10 @@ export const LADDER = [
       { name: 'craft', args: { item: 'stone_pickaxe', count: 3, optional: true } },
       { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
       { name: 'craft', args: { item: 'crafting_table', count: 1, optional: true } },
-      { name: 'branchMine', args: { targetY: ctx.config.ironY, ore: 'iron_ore', count: IRON_TARGET + 3 } },
+      // Exactly the target, not target+3. Asking for three more ore blocks than the rung
+      // needs meant she kept mining for seventeen minutes after the budget was already
+      // satisfied, because the action's goal and the rung's goal disagreed.
+      { name: 'branchMine', args: { targetY: ctx.config.ironY, ore: 'iron_ore', count: IRON_TARGET } },
     ],
   },
   {
