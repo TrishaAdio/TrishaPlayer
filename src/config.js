@@ -32,20 +32,33 @@ export const config = {
   owner: process.env.OWNER || '',
   friends: list(process.env.FRIENDS),
   llm: {
-    baseURL: process.env.ZEN_BASE_URL || 'https://zendigikey.shop/v1',
-    apiKey: process.env.ZEN_API_KEY || '',
+    /**
+     * LLM_* are the preferred names; ZEN_* are kept as aliases so existing .env files
+     * keep working. The relay moved off Zen, and "ZEN_BASE_URL" pointing at something
+     * that is not Zen is the kind of detail that wastes an hour later.
+     */
+    baseURL: process.env.LLM_BASE_URL || process.env.ZEN_BASE_URL || 'http://54.204.234.44:3000/v1',
+    apiKey: process.env.LLM_API_KEY || process.env.ZEN_API_KEY || '',
     fast: process.env.MODEL_FAST || 'claude-haiku-4.5',
     smart: process.env.MODEL_SMART || 'claude-opus-5',
     // Used for the one expensive think that matters: surveying the area and building
     // a plan against it.
     planner: process.env.MODEL_PLANNER || 'claude-opus-4.8',
     chat: process.env.MODEL_CHAT || process.env.MODEL_FAST || 'claude-haiku-4.5',
+    /**
+     * Fallbacks are only useful if they exist. The old defaults listed gpt-5.4-mini and
+     * gpt-5.5, which 404 on this relay, so a dead primary fell through to two more dead
+     * names. These are all confirmed serving by `npm run probe`.
+     *
+     * claude-opus-4.5 and claude-sonnet-4 are deliberately excluded: both refuse the
+     * persona outright with "I'm a coding assistant for the Kiro CLI".
+     */
     fastFallbacks: list(process.env.MODEL_FAST_FALLBACKS).length
       ? list(process.env.MODEL_FAST_FALLBACKS)
-      : ['gpt-5.6-terra', 'gpt-5.4-mini', 'gpt-5.5'],
+      : ['gpt-5.6-terra', 'gpt-5.6-luna', 'qwen3-coder-next'],
     smartFallbacks: list(process.env.MODEL_SMART_FALLBACKS).length
       ? list(process.env.MODEL_SMART_FALLBACKS)
-      : ['claude-opus-4.8', 'gpt-5.5'],
+      : ['claude-sonnet-5', 'claude-opus-4.8', 'gpt-5.6-sol'],
     timeoutMs: num(process.env.LLM_TIMEOUT_MS, 20000),
   },
   brain: {
@@ -83,7 +96,9 @@ export const config = {
 export function assertConfig() {
   const problems = [];
   if (!config.llm.apiKey || config.llm.apiKey.startsWith('sk-replace')) {
-    problems.push('ZEN_API_KEY is not set in .env — the brain cannot start.');
+    // Name both, because the variable was renamed and the old message sent me looking
+    // for a key that was present under the new name.
+    problems.push('LLM_API_KEY (or legacy ZEN_API_KEY) is not set in .env — the brain cannot start.');
   }
   if (!config.owner) {
     problems.push('OWNER is not set in .env — Trisha will not know who to obey.');

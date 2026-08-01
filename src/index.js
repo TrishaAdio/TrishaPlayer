@@ -9,8 +9,8 @@ import { createTrisha } from './bot.js';
 
 const problems = assertConfig();
 for (const p of problems) log.warn(p);
-if (problems.some((p) => p.includes('ZEN_API_KEY'))) {
-  log.error('no API key — she would have no brain. put ZEN_API_KEY in .env');
+if (problems.some((p) => p.includes("API_KEY"))) {
+  log.error('no API key — she would have no brain. put LLM_API_KEY in .env');
   process.exit(1);
 }
 
