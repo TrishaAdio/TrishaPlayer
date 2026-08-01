@@ -638,7 +638,21 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
     }
   } catch {}
 
-  const batch = Math.min(want, available, 64);
+  /**
+   * ONLY COMMIT WHAT HER FUEL CAN ACTUALLY COOK.
+   *
+   * The old code shovelled all 33 ore in and hoped. With six oak logs — nine items of burn
+   * for a thirty-three item job — it ran dry, returned, and left everything in the furnace.
+   * Loading a batch her fuel can finish means there is nothing to abandon.
+   */
+  const fuelPlan = chooseFuel(bot, want);
+  if (!fuelPlan) return { ok: false, reason: 'no fuel for the furnace' };
+  const canBurn = Math.max(1, Math.floor(fuelPlan.have * fuelPlan.per));
+  const batch = Math.min(want, available, 64, canBurn);
+  if (canBurn < want) {
+    log.act(`[smelt] fuel only covers ${canBurn} of ${want} ${outName} — smelting ${batch} this pass`);
+  }
+
   let produced = 0;
   try {
     const fuel = chooseFuel(bot, batch);
@@ -702,10 +716,85 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
     }
     return { ok: produced > 0, reason: err.message, detail: `smelted ${produced}` };
   } finally {
+    /**
+     * NEVER WALK AWAY FROM HER MATERIALS.
+     *
+     * This is the one that cost two full mining trips. A live run left 24 raw_iron and 9
+     * finished ingots sitting in a furnace at -4,26,-42 because the smelt ran out of fuel
+     * and simply returned — then she spent another twenty minutes underground mining iron
+     * she already owned. Whatever happens, everything comes back out before she leaves.
+     */
+    try {
+      const out = furnace.outputItem();
+      if (out) {
+        const taken = await furnace.takeOutput().catch(() => null);
+        if (taken) {
+          produced += taken.count;
+          log.act(`[smelt] took the last ${taken.count}x ${taken.name} out`);
+        }
+      }
+    } catch {}
+    try {
+      if (furnace.inputItem()) {
+        const back = await furnace.takeInput().catch(() => null);
+        if (back) log.act(`[smelt] reclaimed ${back.count}x ${back.name} from the furnace — not leaving it behind`);
+      }
+    } catch {}
     try {
       furnace.close();
     } catch {}
   }
 
   return { ok: produced > 0, detail: `smelted ${produced}x ${outName}`, got: produced };
+}
+
+/**
+ * Empty a furnace she has used before.
+ *
+ * Recovery for material stranded by an interrupted or under-fuelled smelt. She had 33
+ * ingots' worth of iron locked in a furnace while the ladder sent her back down the mine
+ * for more, because nothing ever went back to check.
+ */
+export async function emptyFurnace(bot, task) {
+  const ids = [bot.mcData.blocksByName.furnace?.id, bot.mcData.blocksByName.blast_furnace?.id].filter((x) => x != null);
+  let block = bot.findBlock({ matching: ids, maxDistance: 16 });
+
+  if (!block) {
+    const wp = mem.all.waypoints?.furnace;
+    if (!wp) return { ok: true, detail: 'no furnace to check' };
+    const pos = new Vec3(wp.x, wp.y, wp.z);
+    if (bot.entity.position.distanceTo(pos) > 128) return { ok: true, detail: 'remembered furnace is too far' };
+    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 60000 });
+    if (!res.ok) return { ok: true, detail: 'could not get back to the furnace' };
+    block = bot.findBlock({ matching: ids, maxDistance: 6 });
+    if (!block) return { ok: true, detail: 'furnace is gone' };
+  }
+
+  if (bot.entity.position.distanceTo(block.position) > 3.2) {
+    await goTo(bot, task, block.position.x, block.position.y, block.position.z, { range: 2, timeoutMs: 30000 }).catch(() => {});
+  }
+
+  let furnace;
+  try {
+    furnace = await bot.openFurnace(block);
+  } catch (err) {
+    return { ok: true, detail: `could not open the furnace: ${err.message}` };
+  }
+  let got = 0;
+  try {
+    for (const take of ['takeOutput', 'takeInput', 'takeFuel']) {
+      try {
+        const item = await furnace[take]().catch(() => null);
+        if (item) {
+          got += item.count;
+          log.act(`[furnace] recovered ${item.count}x ${item.name}`);
+        }
+      } catch {}
+    }
+  } finally {
+    try {
+      furnace.close();
+    } catch {}
+  }
+  return { ok: true, detail: got ? `recovered ${got} items from the furnace` : 'furnace was empty', got };
 }

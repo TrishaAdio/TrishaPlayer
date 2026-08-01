@@ -358,6 +358,9 @@ export const LADDER = [
      * trip ended early with "pickaxe dying" and the retry had no pickaxe at all.
      */
     actions: (bot, ctx) => [
+      // Check the furnace first. A live run had 24 raw_iron and 9 ingots stranded in one
+      // while the ladder sent her back down the mine for iron she already owned.
+      { name: 'emptyFurnace', args: {} },
       { name: 'craft', args: { item: 'stone_pickaxe', count: 3, optional: true } },
       { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
       { name: 'craft', args: { item: 'crafting_table', count: 1, optional: true } },
