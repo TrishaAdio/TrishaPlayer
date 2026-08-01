@@ -1415,6 +1415,22 @@ export class Brain {
       return steps;
     }
 
+    /**
+     * A furnace product is smelted, never crafted. Without this the repair chain tried
+     * `craft iron_ingot`, which resolves through `iron_block` and back to nine ingots —
+     * a loop that burned the run twice while she was carrying the raw ore.
+     */
+    if (result?.mustSmelt || /must be smelted/.test(reason)) {
+      const product = result?.mustSmelt || 'iron_ingot';
+      return [
+        { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true }, why: 'fuel for the furnace' },
+        { name: 'smelt', args: { item: product, count: 33 }, why: `${product} comes out of a furnace` },
+      ];
+    }
+    if (/^iron_ingot$|^gold_ingot$|^copper_ingot$|^charcoal$/.test(String(step.args?.item || ''))) {
+      return [{ name: 'smelt', args: { item: String(step.args.item), count: 33 }, why: 'smelt it rather than craft it' }];
+    }
+
     // "need 3x cobblestone for stone_pickaxe" — go and get the 3 cobblestone.
     const m = /need (\d+)x ([a-z_]+)/.exec(reason);
     if (m) {

@@ -377,6 +377,16 @@ export const LADDER = [
      */
     done: (bot) => wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3 && owns(bot, 'shield'),
     actions: () => [
+      /**
+       * FUEL FIRST. Smelting 33 iron needs about 5 coal, or 22 planks.
+       * A live run got 33 ore out of the ground and then stalled on
+       *   smelting 33x raw_iron -> iron_ingot (6x oak_log as fuel)
+       * which is nine items of burn for a thirty-three item job. Moving `torches` after
+       * this rung fixed reaching iron but left her with no coal at the moment she needed
+       * it most. She is already underground with a pickaxe, so coal is cheap here.
+       */
+      { name: 'mine', args: { block: 'coal_ore', count: 8, optional: true } },
+      { name: 'chopWood', args: { count: 8, optional: true } },
       // Come up and do the smelting and crafting at camp, in daylight, rather than
       // standing at Y=11 in the dark with no armour on while a furnace burns.
       { name: 'home', args: {} },

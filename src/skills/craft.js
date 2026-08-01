@@ -369,6 +369,26 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
   const name = String(item).toLowerCase().replace(/\s+/g, '_');
   const def = bot.mcData.itemsByName[name] || bot.mcData.blocksByName[name];
   if (!def) return { ok: !!optional, reason: `no such item "${item}"` };
+
+  /**
+   * NEVER TRY TO *CRAFT* A FURNACE PRODUCT.
+   *
+   * An ingot has a crafting recipe — nine of them come back out of a block — so asking to
+   * craft one sends the resolver into a circle. Observed live, repeatedly:
+   *   craft iron_ingot -> FAILED: need 1x iron_block for iron_ingot
+   *   craft iron_block -> FAILED: need 9x iron_ingot for iron_block
+   * Iron comes out of a furnace. Say so, so the layer above smelts instead of looping.
+   */
+  if (SMELT_INPUT[name] && count(bot, name) < want) {
+    const haveInput = SMELT_INPUT[name].some((n) => count(bot, n) > 0);
+    return {
+      ok: !!optional,
+      reason: haveInput
+        ? `${name} must be smelted, not crafted`
+        : `need ${SMELT_INPUT[name][0]} to smelt into ${name}`,
+      mustSmelt: name,
+    };
+  }
   const id = bot.mcData.itemsByName[name]?.id ?? def.id;
 
   if (count(bot, name) >= want) return { ok: true, detail: `already have ${want} ${name}` };
@@ -606,6 +626,18 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
 
   // Count the input across every slot — a 33-iron batch can arrive as two stacks.
   const available = inputs.reduce((n, name) => n + countAllSlots(bot, name), 0);
+  /**
+   * Reclaim whatever a previous, interrupted smelt left behind. A cancelled action (a
+   * restart, a mob, a watchdog) used to walk away leaving the ore and the finished ingots
+   * sitting in the furnace.
+   */
+  try {
+    if (furnace.outputItem()) {
+      const back = await furnace.takeOutput().catch(() => null);
+      if (back) log.act(`[smelt] reclaimed ${back.count}x ${back.name} left in the furnace`);
+    }
+  } catch {}
+
   const batch = Math.min(want, available, 64);
   let produced = 0;
   try {
