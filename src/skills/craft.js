@@ -578,6 +578,22 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
 
   if (!chooseFuel(bot, 1)) return { ok: false, reason: 'no fuel for the furnace' };
 
+  /**
+   * MAKE ROOM BEFORE SMELTING.
+   *
+   * A live run reached 33 ingots' worth of iron and could not smelt a single one:
+   *   smelt -> FAILED: destination full
+   * She was carrying 392 items, most of it granite and gravel swept up while branch
+   * mining, so the output had nowhere to land. Mining fills a pack with rubble; empty it
+   * before asking the furnace for anything.
+   */
+  const usedSlots = bot.inventory.slots.slice(9, 45).filter(Boolean).length;
+  if (usedSlots >= 32) {
+    const { dropJunk } = await import('./storage.js');
+    log.act(`[smelt] ${usedSlots}/36 slots used — clearing rubble so the ingots have somewhere to go`);
+    await dropJunk(bot, task).catch(() => {});
+  }
+
   const block = await ensureFurnace(bot, task);
   if (!block) return { ok: false, reason: 'no furnace available' };
 
