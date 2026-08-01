@@ -11,9 +11,31 @@
 import { config, assertConfig } from '../src/config.js';
 import { complete, extractJson, pingModel } from '../src/llm/client.js';
 
-const CANDIDATES = process.argv.slice(2).length
-  ? process.argv.slice(2)
-  : ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4.8', 'gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5'];
+/**
+ * ASK THE RELAY WHAT IT SERVES, DO NOT GUESS.
+ *
+ * The candidate list used to be hardcoded, so when the relay changed every name 404'd and
+ * the probe reported "1/6 usable" about a relay serving nineteen healthy models. A probe
+ * whose job is to tell you what works must not itself carry stale assumptions.
+ *
+ * Pass model names as arguments to test a specific set instead.
+ */
+async function discoverModels() {
+  try {
+    const res = await fetch(`${config.llm.baseURL.replace(/\/$/, '')}/models`, {
+      headers: { authorization: `Bearer ${config.llm.apiKey}` },
+      signal: AbortSignal.timeout(20000),
+    });
+    const json = await res.json();
+    const ids = (json?.data || []).map((m) => m.id).filter((id) => id && id !== 'auto');
+    if (ids.length) return ids;
+  } catch (err) {
+    console.log(`  could not list models (${err.message}) — falling back to the configured tiers`);
+  }
+  return [...new Set([config.llm.fast, config.llm.smart, config.llm.chat, config.llm.planner].filter(Boolean))];
+}
+
+const CANDIDATES = process.argv.slice(2).length ? process.argv.slice(2) : await discoverModels();
 
 // A genuinely dangerous situation. A good model retreats/eats/blocks.
 // A bad one goes mining. This is the real test.
