@@ -715,6 +715,22 @@ export async function digDown(bot, task, { toY = 16, staircase = true } = {}) {
   log.act(`descending to Y=${toY}`);
   let guard = 0;
   let turns = 0;
+  let idleSteps = 0;
+
+  /**
+   * Do not start a staircase off the side of a mountain. If she is standing over open air
+   * the sane first move is to get onto solid ground — which is also what stops her
+   * "descending" for minutes without moving a block.
+   */
+  const under = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
+  if (!under || under.boundingBox === 'empty') {
+    const g = groundBelow(bot, 24);
+    if (g.found && !g.lethal && g.drop > 1) {
+      log.act(`over a ${g.drop}-block drop — getting onto solid ground before digging down`);
+      const land = bot.entity.position.floored().offset(0, -g.drop + 1, 0);
+      await goTo(bot, task, land.x, land.y, land.z, { range: 2, timeoutMs: 20000 }).catch(() => {});
+    }
+  }
   const yaw = bot.entity.yaw;
   let dir = new Vec3(-Math.round(Math.sin(yaw)), 0, -Math.round(Math.cos(yaw)));
   if (dir.x === 0 && dir.z === 0) dir = new Vec3(1, 0, 0);
@@ -795,11 +811,49 @@ export async function digDown(bot, task, { toY = 16, staircase = true } = {}) {
     }
     turns = 0;
 
-    const res = await goTo(bot, task, step.x, step.y, step.z, { range: 0, timeoutMs: 10000 });
-    if (!res.ok) {
+    /**
+     * CLIFF EDGES BROKE THIS COMPLETELY.
+     *
+     * Live: she stood at 19,46,-32 on a ledge for three solid minutes, `descending to
+     * Y=16`, never moving. The staircase step is `pos + dir + (0,-1,0)`, which on a ledge
+     * is open air — so there was nothing to dig (all three targets already empty) and
+     * pathfinder could not route into a floating block. goTo failed after 10s, she nudged
+     * forward, and the whole thing repeated. digDown silently assumed solid terrain.
+     *
+     * Nothing to dig AND nowhere to step means this bearing is a drop, not a staircase:
+     * turn, and count it so she gives up and lets the ladder try another approach.
+     */
+    const nothingToDig = targets.every((t) => {
+      const b = bot.blockAt(t);
+      return !b || b.boundingBox === 'empty';
+    });
+
+    const res = await goTo(bot, task, step.x, step.y, step.z, { range: 0, timeoutMs: 4000 });
+    if (res.ok) {
+      idleSteps = 0;
+    } else {
+      if (nothingToDig) {
+        dir = new Vec3(-dir.z, 0, dir.x);
+        turns++;
+        idleSteps++;
+        log.reflex(`nothing to dig and nowhere to stand at ${step.x},${step.y},${step.z} — that way is a drop, turning`);
+        if (turns >= 8 || idleSteps >= 10) {
+          stopMoving(bot);
+          return {
+            ok: false,
+            reason: `cannot staircase down from ${p.x},${p.y},${p.z} — open drops on every bearing`,
+          };
+        }
+        continue;
+      }
       bot.setControlState('forward', true);
       await task.sleep(400);
       bot.setControlState('forward', false);
+      idleSteps++;
+      if (idleSteps >= 12) {
+        stopMoving(bot);
+        return { ok: false, reason: `stuck descending at ${p.x},${p.y},${p.z}` };
+      }
     }
 
     if (guard % TORCH_EVERY === 0) await placeTorch(bot, task).catch(() => {});

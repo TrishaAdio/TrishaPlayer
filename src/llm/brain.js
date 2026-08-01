@@ -371,10 +371,20 @@ export class Brain {
      */
     const BUDGET = {
       // travel and gathering: minutes are normal
-      chopWood: 90000, mine: 60000, branchMine: 180000, collectDrops: 45000,
-      explore: 90000, goto: 90000, come: 90000, home: 120000, follow: 999999,
-      getFood: 120000, forageFood: 120000, butcher: 90000, getWool: 90000,
-      farmCrops: 90000, harvest: 90000, digDown: 120000, netherRun: 600000,
+      /**
+       * Tightened deliberately. These are FREEZE detectors, not work limits: every skill
+       * calls task.beat() when it actually achieves something, which resets the clock. So
+       * a genuinely productive trip is never cut short, while a frozen one is caught in
+       * tens of seconds instead of minutes.
+       *
+       * 180s for branchMine was the worst offender — she stood on a cliff edge for three
+       * full minutes "descending to Y=16" without moving a block, and that is exactly the
+       * standing-around-doing-nothing that makes her look broken.
+       */
+      chopWood: 70000, mine: 50000, branchMine: 75000, collectDrops: 40000,
+      explore: 70000, goto: 60000, come: 90000, home: 120000, follow: 999999,
+      getFood: 90000, forageFood: 90000, butcher: 70000, getWool: 70000,
+      farmCrops: 90000, harvest: 90000, digDown: 60000, netherRun: 600000,
       xpGrind: 180000, base: 120000, shelter: 90000, bridge: 90000,
       // stationary but productive
       craft: 45000, smelt: 120000, deposit: 45000, withdraw: 45000, enchant: 60000,
