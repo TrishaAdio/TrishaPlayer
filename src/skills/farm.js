@@ -9,13 +9,30 @@ import { goTo } from './move.js';
 import { collectDrops, digBlock } from './gather.js';
 import { craft, smelt } from './craft.js';
 import { equipWeapon } from '../reflex/gear.js';
-import { FOOD_ANIMALS } from '../world/scan.js';
+import { FOOD_ANIMALS, isUnderground } from '../world/scan.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const COOKED = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken', 'cooked_rabbit', 'cooked_cod', 'cooked_salmon', 'bread', 'baked_potato'];
 const RAW = ['beef', 'porkchop', 'mutton', 'chicken', 'rabbit', 'cod', 'salmon', 'potato'];
 const FORAGEABLE = ['sweet_berry_bush', 'wheat', 'carrots', 'potatoes', 'beetroots', 'melon', 'pumpkin'];
+
+/**
+ * THE ONE THAT STARVED HER TO DEATH BESIDE A HEDGE FULL OF FOOD.
+ *
+ * Success was measured against COOKED and RAW only — meat and bread. So she could pick a
+ * stack of sweet berries and `forageFood` would still report "nothing edible around, no
+ * animals, crops or fish in range". Four attempts failed that way over thirteen minutes,
+ * the anti-thrash gate parked getFood as useless, and the server log finished the story:
+ *   19:56:08  Trisha was poked to death by a sweet berry bush
+ * She died to the plant she was supposed to be eating.
+ *
+ * Anything that restores hunger counts as food. Rotten flesh included — it is what a
+ * real player eats when the alternative is dying.
+ */
+const FORAGED = ['sweet_berries', 'carrot', 'beetroot', 'melon_slice', 'apple', 'pumpkin', 'dried_kelp', 'brown_mushroom', 'wheat'];
+const LAST_RESORT = ['rotten_flesh', 'spider_eye'];
+const EDIBLE = [...COOKED, ...RAW, ...FORAGED, ...LAST_RESORT];
 
 const count = (bot, n) => bot.inventory.items().reduce((a, i) => (i.name === n ? a + i.count : a), 0);
 const total = (bot, names) => names.reduce((a, n) => a + count(bot, n), 0);
@@ -38,9 +55,10 @@ export async function butcher(bot, task, { animal = 'any', count: want = 2 } = {
       misses++;
       // One look around, then give up. Wandering the map for livestock is what made
       // her look aimless.
-      if (misses > 1) return { ok: killed > 0, detail: `killed ${killed}`, got: killed, reason: 'no animals anywhere nearby' };
+      // Two looks, not one. Livestock is patchy and a single bearing is a coin flip.
+      if (misses > 2) return { ok: killed > 0, detail: `killed ${killed}`, got: killed, reason: 'no animals anywhere nearby' };
       const { explore } = await import('./move.js');
-      await explore(bot, task, { radius: 40 }).catch(() => {});
+      await explore(bot, task, { radius: 56, reason: 'hunting for livestock' }).catch(() => {});
       continue;
     }
 
@@ -86,15 +104,41 @@ export async function forageCrops(bot, task, { radius = 40 } = {}) {
   let picked = 0;
   for (const pos of found.slice(0, 14)) {
     task.check();
-    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 12000 });
+    /**
+     * Keep out of the bush. Range 3 and the safe movement profile, which refuses to route
+     * through anything in the avoid list — a berry patch is wall-to-wall damage.
+     */
+    const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 3, timeoutMs: 12000, safeMode: true });
     if (!res.ok) continue;
     const b = bot.blockAt(pos);
     if (!b) continue;
     if (b.name === 'sweet_berry_bush') {
-      try {
-        await bot.activateBlock(b);
-        picked++;
-      } catch {}
+      /**
+       * BREAK IT, DO NOT WADE INTO IT.
+       *
+       * Walking into a sweet berry bush deals damage on every step, and it killed her
+       * twice — the second time holding 22 berries she had just finished picking:
+       *   20:21:19  Trisha was poked to death by a sweet berry bush
+       * Breaking the bush from arm's length drops the same berries and removes the hazard
+       * instead of leaving a minefield she has to keep walking through.
+       */
+      if (await digBlock(bot, task, b, { safety: false, harvest: false })) picked++;
+      else {
+        try {
+          await bot.activateBlock(b);
+          picked++;
+        } catch {}
+      }
+      // Berries are food. If that hurt, eat before reaching for the next bush.
+      if (bot.health < 14) {
+        const berry = bot.inventory.items().find((i) => i.name === 'sweet_berries');
+        if (berry) {
+          try {
+            await bot.equip(berry, 'hand');
+            await bot.consume();
+          } catch {}
+        }
+      }
     } else if (await digBlock(bot, task, b, { safety: false })) picked++;
   }
   await collectDrops(bot, task, { radius: 8, quiet: true });
@@ -107,7 +151,22 @@ export async function forageCrops(bot, task, { radius = 40 } = {}) {
 export async function forageFood(bot, task, { target = 8, urgent = false } = {}) {
   const startCooked = total(bot, COOKED);
   const startRaw = total(bot, RAW);
-  log.act(`getting food (has ${startCooked} cooked, ${startRaw} raw, wants ${target})`);
+  const startEdible = total(bot, EDIBLE);
+  log.act(`getting food (has ${startEdible} edible: ${startCooked} cooked, ${startRaw} raw, wants ${target})`);
+
+  /**
+   * NOTHING GROWS AT Y=30.
+   *
+   * She ran out of food part way down a mine shaft and then hunted for cows in a tunnel,
+   * failing five attempts in a row while starving. Animals, crops and berries are all on
+   * the surface, so the first move when hungry underground is to climb.
+   */
+  if (isUnderground(bot)) {
+    const { ascendToSurface } = await import('./move.js');
+    const y = Math.round(bot.entity.position.y);
+    log.act(`hungry and underground at Y=${y} — surfacing first, nothing edible grows down here`);
+    await ascendToSurface(bot, task, { targetY: y + 25, timeoutMs: 60000 }).catch(() => {});
+  }
 
   if (urgent) {
     // Starving: eat literally anything, sort quality out later.
@@ -134,11 +193,44 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
       if (total(bot, RAW) === 0) {
         await fish(bot, task, { count: 2 }).catch(() => {});
       }
+
+      /**
+       * LAST RESORT: EAT WHAT IS ACTUALLY ATTACKING HER.
+       *
+       * Three of her deaths were zombies and this world has almost no livestock near
+       * spawn, so "no animals nearby" kept being the honest answer while a food source
+       * walked up to her every night. Rotten flesh is poor food and it is far better than
+       * starving — which is what actually killed her.
+       */
+      if (total(bot, EDIBLE) === 0) {
+        const { hostilesNear } = await import('../world/scan.js');
+        const mobs = hostilesNear(bot, 16).filter((e) => /zombie|husk|drowned/.test(e.name));
+        if (mobs.length) {
+          log.act(`nothing to eat and ${mobs.length} zombie(s) nearby — taking the flesh instead`);
+          await equipWeapon(bot).catch(() => {});
+          for (const m of mobs.slice(0, 2)) {
+            task.check();
+            const e = m.entity;
+            if (!e || !bot.entities[e.id]) continue;
+            await goTo(bot, task, e.position.x, e.position.y, e.position.z, { range: 2, timeoutMs: 12000 }).catch(() => {});
+            for (let swing = 0; swing < 12 && bot.entities[e.id]; swing++) {
+              task.check();
+              await bot.lookAt(e.position.offset(0, 1, 0), true).catch(() => {});
+              await bot.attack(e).catch(() => {});
+              await task.sleep(600);
+            }
+          }
+          await collectDrops(bot, task, { radius: 10, quiet: true }).catch(() => {});
+        }
+      }
+
+      // Anything already on the ground nearby counts — drops from fights she has had.
+      if (total(bot, EDIBLE) === 0) await collectDrops(bot, task, { radius: 12, quiet: true }).catch(() => {});
     }
-    const got = total(bot, [...RAW, ...COOKED]);
+    const got = total(bot, EDIBLE);
     return got > 0
-      ? { ok: true, detail: `grabbed emergency food (${got})`, got }
-      : { ok: false, reason: 'nothing edible around — no animals, crops or fish in range' };
+      ? { ok: true, detail: `grabbed emergency food (${got} edible)`, got }
+      : { ok: false, reason: 'nothing edible around — no animals, crops, berries or fish in range' };
   }
 
   /**
@@ -150,10 +242,10 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
    * within two sweeps, say so and let the brain choose something else.
    */
   let guard = 0;
-  while (total(bot, COOKED) + total(bot, RAW) < target && guard++ < 2) {
+  while (total(bot, EDIBLE) < target && guard++ < 2) {
     task.check();
     await butcher(bot, task, { count: Math.ceil((target - total(bot, RAW)) / 2) }).catch(() => {});
-    if (total(bot, RAW) + total(bot, COOKED) >= target) break;
+    if (total(bot, EDIBLE) >= target) break;
     await forageCrops(bot, task, { radius: 40 }).catch(() => {});
   }
 
@@ -176,11 +268,11 @@ export async function forageFood(bot, task, { target = 8, urgent = false } = {})
    */
   const cooked = total(bot, COOKED);
   const raw = total(bot, RAW);
-  const startEdible = startCooked + startRaw;
-  const edible = cooked + raw;
+  const foraged = total(bot, [...FORAGED, ...LAST_RESORT]);
+  const edible = cooked + raw + foraged;
   return {
     ok: edible > startEdible || edible >= target,
-    detail: `food: ${cooked} cooked, ${raw} raw (was ${startEdible})`,
+    detail: `food: ${cooked} cooked, ${raw} raw, ${foraged} foraged (was ${startEdible})`,
     got: edible,
     reason: edible > startEdible ? undefined : 'found nothing edible in range',
   };

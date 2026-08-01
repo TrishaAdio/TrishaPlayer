@@ -118,6 +118,11 @@ export const ACTIONS = {
     describe: 'smelt{item,count} cook or smelt in a furnace',
     run: ({ bot, task }, a) => craftSkills.smelt(bot, task, { item: str(a.item), count: num(a.count, 1), any: a.any }),
   },
+  emptyFurnace: {
+    group: 'craft',
+    describe: 'emptyFurnace{} collect anything left in a furnace she has used',
+    run: ({ bot, task }) => craftSkills.emptyFurnace(bot, task),
+  },
   equipBest: {
     group: 'craft',
     describe: 'equipBest{} wear the best armour and hold the best weapon',

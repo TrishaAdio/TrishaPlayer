@@ -172,3 +172,51 @@ export async function dropItem(bot, task, { item, count: want = 1 } = {}) {
     return { ok: false, reason: err.message };
   }
 }
+
+
+/**
+ * THROW AWAY THE GRAVEL.
+ *
+ * A live run reached 33 ingots' worth of iron and then could not smelt any of it:
+ *   21:16:59  smelt -> FAILED: destination full
+ * She was carrying 396 items — granite, tuff, dirt and gravel swept up while branch
+ * mining — so there was nowhere for the ingots to land. Mining fills a pack with rubble;
+ * a player empties it. Anything genuinely useful is protected by name.
+ */
+const JUNK = [
+  'granite', 'diorite', 'andesite', 'tuff', 'gravel', 'dirt', 'coarse_dirt', 'sand', 'red_sand',
+  'deepslate', 'cobbled_deepslate', 'clay', 'calcite', 'smooth_basalt', 'basalt', 'netherrack',
+  'rooted_dirt', 'mud', 'sandstone', 'grass_block', 'podzol', 'mycelium', 'flint', 'seagrass',
+  'kelp', 'short_grass', 'tall_grass', 'fern', 'dead_bush', 'poppy', 'dandelion', 'lilac',
+];
+
+/** Keep a working amount of cobblestone — it is tools, furnaces and shelter. */
+const KEEP_SOME = { cobblestone: 64, stick: 32, torch: 32, coal: 32 };
+
+export async function dropJunk(bot, task, { aggressive = false } = {}) {
+  let dropped = 0;
+  for (const item of [...bot.inventory.items()]) {
+    task.check();
+    const cap = KEEP_SOME[item.name];
+    if (cap != null) {
+      // Trim an overflowing stack rather than dumping something she needs.
+      const excess = item.count - cap;
+      if (excess > 0) {
+        try {
+          await bot.toss(item.type, null, excess);
+          dropped += excess;
+        } catch {}
+      }
+      continue;
+    }
+    if (!JUNK.includes(item.name)) continue;
+    if (!aggressive && /cobblestone|coal|stick|torch/.test(item.name)) continue;
+    try {
+      await bot.toss(item.type, null, item.count);
+      dropped += item.count;
+      await task.sleep(90);
+    } catch {}
+  }
+  if (dropped) log.act(`[tidy] dropped ${dropped} items of rubble to make room`);
+  return { ok: true, detail: `dropped ${dropped}`, got: dropped };
+}

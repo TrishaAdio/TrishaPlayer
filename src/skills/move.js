@@ -67,7 +67,14 @@ export function installMovement(bot) {
    * of air in the middle. Making liquid enormously expensive keeps her on land
    * whenever land exists, without forbidding a one-block stream crossing outright.
    */
-  if ('liquidCost' in m) m.liquidCost = 40;
+  /**
+   * 150, not 40. She has now drowned three times on a coastal spawn, once losing 22
+   * ingots' worth of iron she had spent twenty minutes mining. At 40 a lake crossing
+   * still won on cost against a longer walk around, and a long swim means running out of
+   * air in the middle of it. This does not forbid stepping over a one-block stream; it
+   * does stop open water ever looking like a shortcut.
+   */
+  if ('liquidCost' in m) m.liquidCost = 150;
   m.allowEntityDetection = true;
 
   for (const name of AVOID) {
@@ -92,6 +99,16 @@ export function installMovement(bot) {
   safe.allow1by1towers = false;
   safe.maxDropDown = 2;
   safe.allowParkour = false;
+  // The safe profile was missing the water penalty, so "flee safely" could still route
+  // her across a lake. She drowned twice on the surface.
+  if ('liquidCost' in safe) safe.liquidCost = 300;
+  safe.dontCreateFlow = true;
+  // The safe profile refuses water outright: it is used when she is fleeing or hurt,
+  // which is exactly when a swim turns into a drowning.
+  for (const name of ['water', 'flowing_water']) {
+    const b = mcData.blocksByName[name];
+    if (b) safe.blocksToAvoid.add(b.id);
+  }
   for (const name of AVOID) {
     const b = mcData.blocksByName[name];
     if (b) safe.blocksToAvoid.add(b.id);
@@ -357,8 +374,21 @@ export async function explore(bot, task, { radius = 80, reason = 'looking for ne
   }
   if (!best) best = { angle: Math.random() * Math.PI * 2, water: 0 };
 
-  if (best.water > 2 && best.land === 0) {
-    return { ok: false, reason: 'every direction from here is water — not swimming' };
+  /**
+   * Refuse a wet bearing outright rather than only when EVERY direction is wet.
+   * The old test needed land === 0 before it would decline, so a bearing that was mostly
+   * sea still got walked as long as one sample happened to hit a beach.
+   */
+  if (best.water > 1) {
+    log.act(`best bearing still crosses water (${best.water} samples) — staying on land`);
+    const dry = [];
+    for (let i = 0; i < 12; i++) {
+      const angle = (Math.PI * 2 * i) / 12;
+      const s = scoreBearing(angle);
+      if (s.water === 0 && s.land > 0) dry.push({ angle, ...s });
+    }
+    if (!dry.length) return { ok: false, reason: 'every direction from here crosses water — not swimming' };
+    best = dry.sort((a, b) => b.land - a.land)[0];
   }
 
   const dest = start.offset(Math.cos(best.angle) * radius, 0, Math.sin(best.angle) * radius);

@@ -49,14 +49,43 @@ const countAllSlots = (bot, name) => bot.inventory.items().reduce((n, i) => (i.n
  * Pick the fuel that can actually finish the batch, preferring proper fuels over
  * burning the planks she needs for crafting.
  */
-function chooseFuel(bot, batch) {
+function chooseFuel(bot, batch, { reserveWood = 4 } = {}) {
+  /**
+   * DO NOT BURN THE WOOD SHE BUILDS WITH.
+   *
+   * Observed live: "smelting 4x mutton -> cooked_beef (3x birch_log as fuel)" and then
+   * "(1x oak_planks as fuel)", leaving her with logs 0. Cooking mutton she could have eaten
+   * raw cost her the sticks for a pickaxe, the planks for a bench, and the fuel to smelt 33
+   * iron. Wood is her tool material first and a fuel second, so a few logs are ring-fenced
+   * and only spent when nothing else will do.
+   */
+  const woodUnits = (name) => (/_planks$/.test(name) ? 0.25 : 1); // logs-equivalent per unit
+  const logsEquivalent =
+    Object.keys(PLANK_FROM_LOG).reduce((n, l) => n + countAllSlots(bot, l), 0) +
+    Math.floor(Object.values(PLANK_FROM_LOG).reduce((n, p) => n + countAllSlots(bot, p), 0) / 4);
+
   const owned = FUELS.map((name) => {
-    const have = countAllSlots(bot, name);
+    let have = countAllSlots(bot, name);
     if (!have) return null;
+    const isWood = /_planks$|_log$/.test(name);
+    if (isWood) {
+      // Only the surplus above the reserve is available to burn.
+      const spareLogs = Math.max(0, logsEquivalent - reserveWood);
+      have = Math.min(have, Math.floor(spareLogs / woodUnits(name)) || 0);
+      if (have <= 0) return null;
+    }
     const per = fuelYield(name);
-    return { name, have, per, units: Math.max(1, Math.ceil(batch / per)), covers: have * per };
+    return { name, have, per, units: Math.max(1, Math.ceil(batch / per)), covers: have * per, isWood };
   }).filter(Boolean);
   if (!owned.length) return null;
+
+  // Proper fuels first, wood only if there is nothing better.
+  const proper = owned.filter((f) => !f.isWood);
+  if (proper.length) {
+    const enoughProper = proper.filter((f) => f.covers >= batch);
+    const pick = (enoughProper.length ? enoughProper : proper.sort((a, b) => b.covers - a.covers))[0];
+    return { ...pick, units: Math.min(pick.have, pick.units) };
+  }
   // Anything that can cover the whole batch wins; otherwise take the biggest burn.
   const enough = owned.filter((f) => f.covers >= batch);
   const pick = (enough.length ? enough : owned.sort((a, b) => b.covers - a.covers))[0];
@@ -369,6 +398,26 @@ export async function craft(bot, task, { item, count: want = 1, optional = false
   const name = String(item).toLowerCase().replace(/\s+/g, '_');
   const def = bot.mcData.itemsByName[name] || bot.mcData.blocksByName[name];
   if (!def) return { ok: !!optional, reason: `no such item "${item}"` };
+
+  /**
+   * NEVER TRY TO *CRAFT* A FURNACE PRODUCT.
+   *
+   * An ingot has a crafting recipe — nine of them come back out of a block — so asking to
+   * craft one sends the resolver into a circle. Observed live, repeatedly:
+   *   craft iron_ingot -> FAILED: need 1x iron_block for iron_ingot
+   *   craft iron_block -> FAILED: need 9x iron_ingot for iron_block
+   * Iron comes out of a furnace. Say so, so the layer above smelts instead of looping.
+   */
+  if (SMELT_INPUT[name] && count(bot, name) < want) {
+    const haveInput = SMELT_INPUT[name].some((n) => count(bot, n) > 0);
+    return {
+      ok: !!optional,
+      reason: haveInput
+        ? `${name} must be smelted, not crafted`
+        : `need ${SMELT_INPUT[name][0]} to smelt into ${name}`,
+      mustSmelt: name,
+    };
+  }
   const id = bot.mcData.itemsByName[name]?.id ?? def.id;
 
   if (count(bot, name) >= want) return { ok: true, detail: `already have ${want} ${name}` };
@@ -546,7 +595,20 @@ export async function ensureFurnace(bot, task) {
     item = findItem(bot, 'furnace');
   }
   if (!item) return null;
-  return placeSupportBlock(bot, task, item);
+  const placed = await placeSupportBlock(bot, task, item);
+  if (placed) {
+    /**
+     * Remember it, exactly like the bench.
+     *
+     * Placing the furnace takes it out of her inventory, and the stone_tools rung asked
+     * whether she OWNED one — so smelting un-did the rung and the ladder bounced
+     * stone_tools -> food_security -> stone_tools on a live run. A furnace she built and
+     * can walk back to is a furnace she has.
+     */
+    mem.addWaypoint('furnace', placed.position);
+    log.act(`furnace set up at ${placed.position.x},${placed.position.y},${placed.position.z}`);
+  }
+  return placed;
 }
 
 /**
@@ -565,6 +627,22 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
 
   if (!chooseFuel(bot, 1)) return { ok: false, reason: 'no fuel for the furnace' };
 
+  /**
+   * MAKE ROOM BEFORE SMELTING.
+   *
+   * A live run reached 33 ingots' worth of iron and could not smelt a single one:
+   *   smelt -> FAILED: destination full
+   * She was carrying 392 items, most of it granite and gravel swept up while branch
+   * mining, so the output had nowhere to land. Mining fills a pack with rubble; empty it
+   * before asking the furnace for anything.
+   */
+  const usedSlots = bot.inventory.slots.slice(9, 45).filter(Boolean).length;
+  if (usedSlots >= 32) {
+    const { dropJunk } = await import('./storage.js');
+    log.act(`[smelt] ${usedSlots}/36 slots used — clearing rubble so the ingots have somewhere to go`);
+    await dropJunk(bot, task).catch(() => {});
+  }
+
   const block = await ensureFurnace(bot, task);
   if (!block) return { ok: false, reason: 'no furnace available' };
 
@@ -577,7 +655,33 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
 
   // Count the input across every slot — a 33-iron batch can arrive as two stacks.
   const available = inputs.reduce((n, name) => n + countAllSlots(bot, name), 0);
-  const batch = Math.min(want, available, 64);
+  /**
+   * Reclaim whatever a previous, interrupted smelt left behind. A cancelled action (a
+   * restart, a mob, a watchdog) used to walk away leaving the ore and the finished ingots
+   * sitting in the furnace.
+   */
+  try {
+    if (furnace.outputItem()) {
+      const back = await furnace.takeOutput().catch(() => null);
+      if (back) log.act(`[smelt] reclaimed ${back.count}x ${back.name} left in the furnace`);
+    }
+  } catch {}
+
+  /**
+   * ONLY COMMIT WHAT HER FUEL CAN ACTUALLY COOK.
+   *
+   * The old code shovelled all 33 ore in and hoped. With six oak logs — nine items of burn
+   * for a thirty-three item job — it ran dry, returned, and left everything in the furnace.
+   * Loading a batch her fuel can finish means there is nothing to abandon.
+   */
+  const fuelPlan = chooseFuel(bot, want);
+  if (!fuelPlan) return { ok: false, reason: 'no fuel for the furnace' };
+  const canBurn = Math.max(1, Math.floor(fuelPlan.have * fuelPlan.per));
+  const batch = Math.min(want, available, 64, canBurn);
+  if (canBurn < want) {
+    log.act(`[smelt] fuel only covers ${canBurn} of ${want} ${outName} — smelting ${batch} this pass`);
+  }
+
   let produced = 0;
   try {
     const fuel = chooseFuel(bot, batch);
@@ -641,10 +745,100 @@ export async function smelt(bot, task, { item, count: want = 1, any } = {}) {
     }
     return { ok: produced > 0, reason: err.message, detail: `smelted ${produced}` };
   } finally {
+    /**
+     * NEVER WALK AWAY FROM HER MATERIALS.
+     *
+     * This is the one that cost two full mining trips. A live run left 24 raw_iron and 9
+     * finished ingots sitting in a furnace at -4,26,-42 because the smelt ran out of fuel
+     * and simply returned — then she spent another twenty minutes underground mining iron
+     * she already owned. Whatever happens, everything comes back out before she leaves.
+     */
+    try {
+      const out = furnace.outputItem();
+      if (out) {
+        const taken = await furnace.takeOutput().catch(() => null);
+        if (taken) {
+          produced += taken.count;
+          log.act(`[smelt] took the last ${taken.count}x ${taken.name} out`);
+        }
+      }
+    } catch {}
+    try {
+      if (furnace.inputItem()) {
+        const back = await furnace.takeInput().catch(() => null);
+        if (back) log.act(`[smelt] reclaimed ${back.count}x ${back.name} from the furnace — not leaving it behind`);
+      }
+    } catch {}
     try {
       furnace.close();
     } catch {}
   }
 
   return { ok: produced > 0, detail: `smelted ${produced}x ${outName}`, got: produced };
+}
+
+/**
+ * Empty a furnace she has used before.
+ *
+ * Recovery for material stranded by an interrupted or under-fuelled smelt. She had 33
+ * ingots' worth of iron locked in a furnace while the ladder sent her back down the mine
+ * for more, because nothing ever went back to check.
+ */
+export async function emptyFurnace(bot, task) {
+  const ids = [bot.mcData.blocksByName.furnace?.id, bot.mcData.blocksByName.blast_furnace?.id].filter((x) => x != null);
+
+  const drain = async (block) => {
+    if (!block) return 0;
+    if (bot.entity.position.distanceTo(block.position) > 3.2) {
+      const res = await goTo(bot, task, block.position.x, block.position.y, block.position.z, { range: 2, timeoutMs: 30000 });
+      if (!res.ok) return 0;
+    }
+    let furnace;
+    try {
+      furnace = await bot.openFurnace(block);
+    } catch {
+      return 0;
+    }
+    let got = 0;
+    try {
+      for (const take of ['takeOutput', 'takeInput', 'takeFuel']) {
+        try {
+          const item = await furnace[take]().catch(() => null);
+          if (item) {
+            got += item.count;
+            log.act(`[furnace] recovered ${item.count}x ${item.name} at ${block.position.x},${block.position.y},${block.position.z}`);
+          }
+        } catch {}
+      }
+    } finally {
+      try {
+        furnace.close();
+      } catch {}
+    }
+    return got;
+  };
+
+  let got = 0;
+
+  // 1. Anything right here.
+  got += await drain(bot.findBlock({ matching: ids, maxDistance: 16 }));
+
+  /**
+   * 2. AND the one she remembers, even if a closer one existed.
+   *
+   * Checking only the nearest furnace was not enough: she placed a second furnace to cook
+   * food, that became the nearest, and 24 raw_iron plus 9 ingots stayed locked in the first
+   * one while she went back down the mine for more.
+   */
+  const wp = mem.all.waypoints?.furnace;
+  if (wp) {
+    const pos = new Vec3(wp.x, wp.y, wp.z);
+    const already = bot.entity.position.distanceTo(pos) <= 4;
+    if (!already && bot.entity.position.distanceTo(pos) <= 160) {
+      const res = await goTo(bot, task, pos.x, pos.y, pos.z, { range: 2, timeoutMs: 90000 });
+      if (res.ok) got += await drain(bot.findBlock({ matching: ids, maxDistance: 6 }));
+    }
+  }
+
+  return { ok: true, detail: got ? `recovered ${got} items from furnaces` : 'furnaces were empty', got };
 }

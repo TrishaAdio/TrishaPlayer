@@ -337,6 +337,7 @@ export class Brain {
     this.tickLoop();
     this.defenceWatch();
     this.stuckWatch();
+    this.survivalWatch();
   }
 
   /**
@@ -370,10 +371,20 @@ export class Brain {
      */
     const BUDGET = {
       // travel and gathering: minutes are normal
-      chopWood: 90000, mine: 60000, branchMine: 180000, collectDrops: 45000,
-      explore: 90000, goto: 90000, come: 90000, home: 120000, follow: 999999,
-      getFood: 120000, forageFood: 120000, butcher: 90000, getWool: 90000,
-      farmCrops: 90000, harvest: 90000, digDown: 120000, netherRun: 600000,
+      /**
+       * Tightened deliberately. These are FREEZE detectors, not work limits: every skill
+       * calls task.beat() when it actually achieves something, which resets the clock. So
+       * a genuinely productive trip is never cut short, while a frozen one is caught in
+       * tens of seconds instead of minutes.
+       *
+       * 180s for branchMine was the worst offender — she stood on a cliff edge for three
+       * full minutes "descending to Y=16" without moving a block, and that is exactly the
+       * standing-around-doing-nothing that makes her look broken.
+       */
+      chopWood: 70000, mine: 50000, branchMine: 75000, collectDrops: 40000,
+      explore: 70000, goto: 60000, come: 90000, home: 120000, follow: 999999,
+      getFood: 90000, forageFood: 90000, butcher: 70000, getWool: 70000,
+      farmCrops: 90000, harvest: 90000, digDown: 60000, netherRun: 600000,
       xpGrind: 180000, base: 120000, shelter: 90000, bridge: 90000,
       // stationary but productive
       craft: 45000, smelt: 120000, deposit: 45000, withdraw: 45000, enchant: 60000,
@@ -511,6 +522,42 @@ export class Brain {
     this._stuckTimer.unref?.();
   }
 
+  /**
+   * LIFE-THREATENING CONDITIONS MUST BE ABLE TO INTERRUPT WORK.
+   *
+   * `step()` returns early whenever the executor is busy, so a critical emergency could
+   * never fire while a long action was running. Observed live: she branch-mined at
+   * <b>1 HP with 0 food</b> for several minutes, because branchMine held the executor and
+   * nothing in the design was allowed to stop it. The defence watcher already existed for
+   * exactly this reason but only covers hostiles, not starvation or bleeding out.
+   *
+   * This runs on its own timer, like defenceWatch, and only for genuinely lethal states.
+   */
+  survivalWatch() {
+    this._survivalTimer = setInterval(() => {
+      if (!this.running || this.paused || !this.bot.entity || this.bot.health == null) return;
+      if (!this.executor.busy) return;
+      const bot = this.bot;
+      const name = this.executor.currentName;
+      // Eating is not something to interrupt for hunger.
+      if (name === 'getFood' || name === 'forageFood' || name === 'eat' || name === 'heal') return;
+
+      const starving = bot.food <= 2 && !this.reflex.bestFood(true);
+      const bleedingOut = bot.health <= 6;
+      if (!starving && !bleedingOut) return;
+      if (Date.now() - (this._lastSurvivalCut || 0) < 20000) return;
+
+      this._lastSurvivalCut = Date.now();
+      log.warn(
+        `survival interrupt: hp ${Math.round(bot.health)} food ${bot.food} — stopping ${name} before it kills her`,
+      );
+      // Being pulled off a rung to survive is an interruption, not a failed objective.
+      this._rungInterrupted = true;
+      this.executor.cancel('survival emergency');
+    }, 2000);
+    this._survivalTimer.unref?.();
+  }
+
   /** Physically get her moving again: jump, sidestep, and dig out if enclosed. */
   async unstick() {
     const bot = this.bot;
@@ -586,6 +633,17 @@ export class Brain {
         }
       }
 
+      /**
+       * NEVER PICK A FIGHT BARE-HANDED.
+       *
+       * This watcher was structurally unable to decline. An overnight run died 65 times,
+       * and the log is the same twenty lines over and over: "self defence: zombie at
+       * 4.7m", "cancelling flee (defending myself)", then twenty "swing fist" entries and
+       * a death. It cancelled her own escape to start a fight she could not win with no
+       * weapon and no armour. Leave it to criticalEmergency, which walls up or runs.
+       */
+      if (this.defenceless()) return;
+
       const threat = this.nearestThreat();
       if (!threat) return;
 
@@ -601,6 +659,8 @@ export class Brain {
       this.plan = [{ name: 'attack', args: { target: threat.username || threat.name || 'nearest', timeoutMs: 30000 } }];
       // Keep his orders; ladder work re-derives itself.
       if (this.order) this.plan.push(...remaining);
+      // Fighting is an interruption of the rung, not evidence the rung is impossible.
+      this._rungInterrupted = true;
       this.executor.cancel('defending myself');
     }, INTERVAL);
     this._defenceTimer.unref?.();
@@ -610,6 +670,7 @@ export class Brain {
     this.running = false;
     if (this._defenceTimer) clearInterval(this._defenceTimer);
     if (this._stuckTimer) clearInterval(this._stuckTimer);
+    if (this._survivalTimer) clearInterval(this._survivalTimer);
   }
 
   async tickLoop() {
@@ -714,7 +775,11 @@ export class Brain {
     const critical = this.criticalEmergency();
     if (critical && this.allowCritical(critical)) {
       log.brain(`critical: ${critical.name}`);
-      await this.executor.run(critical);
+      // An emergency preempting ladder work is an interruption, not a rung failure.
+      this._rungInterrupted = true;
+      const res = await this.executor.run(critical);
+      // Remember a failed wall-up so the defenceless branch can run instead of standing.
+      if (critical.name === 'shelter' && !res.ok) this._shelterFailedAt = Date.now();
       return;
     }
 
@@ -831,9 +896,24 @@ export class Brain {
       if (!this.plan.length && this.currentRungId && this.ladderActive()) {
         const still = currentRung(bot, this.ctx());
         if (still && still.id === this.currentRungId) {
-          const n = (this.rungFailures.get(still.id) || 0) + 1;
-          this.rungFailures.set(still.id, n);
-          log.brain(`rung ${still.id} still unsatisfied after a full attempt (${n}/3)`);
+          /**
+           * AN INTERRUPTION IS NOT A FAILURE.
+           *
+           * A zombie wandered up during `mining_kit`, self-defence cancelled the plan
+           * four times, and the counter read that as four failed attempts — so an
+           * optional rung got parked and she went down the mine with no wood, no sticks
+           * and no spare pickaxes. She was dead ten seconds into the iron rung.
+           *
+           * Being attacked says nothing about whether the objective is achievable.
+           */
+          if (this._rungInterrupted) {
+            this._rungInterrupted = false;
+            log.debug(`rung ${still.id} was interrupted, not failed — not counting it`);
+          } else {
+            const n = (this.rungFailures.get(still.id) || 0) + 1;
+            this.rungFailures.set(still.id, n);
+            log.brain(`rung ${still.id} still unsatisfied after a full attempt (${n}/3)`);
+          }
         } else if (this.currentRungId) {
           /**
            * The rung changed — but forward or backward? A regression matters far more
@@ -1020,6 +1100,20 @@ export class Brain {
   allowCritical(action) {
     const now = Date.now();
     this._critGate = this._critGate || new Map();
+
+    /**
+     * NEVER MUTE HER ESCAPES.
+     *
+     * The gate exists to stop a useless critical crowding out the ladder, but applying it
+     * to `flee` and `shelter` disabled the only two things that keep her alive. The
+     * overnight log is unambiguous:
+     *   flee has failed 4 times running without fixing anything — parking it for 60s
+     *   self defence: zombie at 4.7m (was flee)  ->  swing fist x20  ->  she died
+     * With escape parked and no weapon, the outcome was fixed. 81 deaths followed.
+     * Running away "not fixing anything" is not evidence that running away is wrong.
+     */
+    if ((action.name === 'flee' || action.name === 'shelter') && this.defenceless()) return true;
+
     const g = this._critGate.get(action.name) || { fails: 0, lastAt: 0, mutedUntil: 0 };
 
     if (now < g.mutedUntil) return false;
@@ -1109,6 +1203,13 @@ export class Brain {
        * the same mob. Holding position keeps reflexes and real emergencies live while
        * refusing to resume ladder work through a zombie.
        */
+      /**
+       * If walling up just failed, RUN. Standing on the spot re-issuing a shelter that
+       * cannot succeed is how she died with a zombie hitting her once a second.
+       */
+      if (this._shelterFailedAt && Date.now() - this._shelterFailedAt < 30000) {
+        return { name: 'flee', args: { from: closeHostiles[0]?.name || 'nearest', distance: 24 } };
+      }
       if (this._shelteredAt && Date.now() - this._shelteredAt < 90000) {
         this.holdUntil = Date.now() + 15000;
         return null;
@@ -1314,6 +1415,22 @@ export class Brain {
       return steps;
     }
 
+    /**
+     * A furnace product is smelted, never crafted. Without this the repair chain tried
+     * `craft iron_ingot`, which resolves through `iron_block` and back to nine ingots —
+     * a loop that burned the run twice while she was carrying the raw ore.
+     */
+    if (result?.mustSmelt || /must be smelted/.test(reason)) {
+      const product = result?.mustSmelt || 'iron_ingot';
+      return [
+        { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true }, why: 'fuel for the furnace' },
+        { name: 'smelt', args: { item: product, count: 33 }, why: `${product} comes out of a furnace` },
+      ];
+    }
+    if (/^iron_ingot$|^gold_ingot$|^copper_ingot$|^charcoal$/.test(String(step.args?.item || ''))) {
+      return [{ name: 'smelt', args: { item: String(step.args.item), count: 33 }, why: 'smelt it rather than craft it' }];
+    }
+
     // "need 3x cobblestone for stone_pickaxe" — go and get the 3 cobblestone.
     const m = /need (\d+)x ([a-z_]+)/.exec(reason);
     if (m) {
@@ -1510,6 +1627,16 @@ Rules:
 
   // ───────────────────────── events ─────────────────────────
   onDeath() {
+    // Dying interrupted whatever rung she was on; it did not prove it impossible.
+    this._rungInterrupted = true;
+    this._shelteredAt = 0;
+    this._shelterFailedAt = 0;
+    /**
+     * A fresh life gets fresh options. Strikes accumulated before dying were muting the
+     * very actions she needed on respawn, which is how one death became eighty-one.
+     */
+    this._critGate = new Map();
+    this._futileTargets = new Map();
     // A death invalidates the plan: she is somewhere else now, with nothing on her.
     this.sessionPlan = null;
     this._lastPlanAt = 0;

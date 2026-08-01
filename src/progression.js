@@ -206,8 +206,22 @@ export const LADDER = [
      * stone_tools -> wood_tools, crafting a fresh table on every lap. Owning the
      * capability is the point, not carrying the block.
      */
+    /**
+     * A WOODEN PICKAXE IS IRRELEVANT ONCE SHE IS CARRYING 33 IRON.
+     *
+     * This is the bug that cost the whole night. She reached 33/33 iron at 02:59, her
+     * stone pickaxe wore out, and because the ladder is strictly ordered it walked her
+     * backwards — stone_tools, then wood_tools, then wood — while `iron_kit` sat further
+     * down the list, unreachable. She carried the full kit's worth of iron for nearly
+     * three hours, never smelted a single ingot, then starved and lost all of it:
+     *   05:42  Death 1 - slain by Zombie, lost iron 33 -> 0
+     *
+     * Once the iron is in her pack the only sane next move is to smelt it and put the
+     * armour on. Regressing to chop a stick for a wooden pickaxe is not progress.
+     */
     done: (bot, ctx) =>
-      pickTier(bot) >= 1 && swordTier(bot) >= 1 && (owns(bot, 'crafting_table') || !!ctx.memory.all.waypoints?.bench),
+      ironSecured(bot) ||
+      (pickTier(bot) >= 1 && swordTier(bot) >= 1 && (owns(bot, 'crafting_table') || !!ctx.memory.all.waypoints?.bench)),
     actions: () => [
       { name: 'craft', args: { item: 'crafting_table', count: 1 } },
       { name: 'craft', args: { item: 'stick', count: 8 } },
@@ -229,7 +243,8 @@ export const LADDER = [
      * stone kit — which spends 16 of them — immediately un-did this rung and sent her
      * back to mine the same stone again. Owning the kit is proof the cobble was got.
      */
-    done: (bot) => count(bot, 'cobblestone') >= 22 || (pickTier(bot) >= 2 && swordTier(bot) >= 2),
+    // Cobble for a stone kit is beside the point once the iron is already mined.
+    done: (bot) => ironSecured(bot) || count(bot, 'cobblestone') >= 22 || (pickTier(bot) >= 2 && swordTier(bot) >= 2),
     actions: () => [{ name: 'mine', args: { block: 'stone', count: 26 } }],
   },
   {
@@ -243,8 +258,11 @@ export const LADDER = [
      * cobblestone is a furnace whenever she wants one (ensureFurnace builds it on
      * demand).
      */
-    done: (bot) =>
-      pickTier(bot) >= 2 && swordTier(bot) >= 2 && (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8),
+    done: (bot, ctx) =>
+      ironSecured(bot) ||
+      (pickTier(bot) >= 2 &&
+        swordTier(bot) >= 2 &&
+        (owns(bot, 'furnace') || count(bot, 'cobblestone') >= 8 || !!ctx.memory.all.waypoints?.furnace)),
     actions: () => [
       /**
        * TWO pickaxes, deliberately.
@@ -272,60 +290,24 @@ export const LADDER = [
      * wall the ladder; genuine starvation is a reflex-layer emergency anyway.
      */
     optional: true,
-    done: (bot) => foodCount(bot) >= 8 || foodCount(bot) + rawMeatCount(bot) >= 12,
+    /**
+     * A full belly plus a few spares is ready for a mining trip.
+     *
+     * Demanding a standing stock of 8 made this rung fight its own purpose: she cooks
+     * food, eats it, drops under the bar, and forages again — the live VPS run bounced
+     * food_security twice. Food is for eating; what matters is that she is not hungry and
+     * has something in reserve.
+     */
+    // Stocking food yields to the iron kit: crafting armour takes a minute, foraging took
+    // five, and `emergency_food` above still catches genuine starvation.
+    done: (bot) =>
+      ironSecured(bot) ||
+      foodCount(bot) >= 6 ||
+      foodCount(bot) + rawMeatCount(bot) >= 10 ||
+      (bot.food >= 14 && foodCount(bot) + rawMeatCount(bot) >= 3),
     actions: () => [
       { name: 'forageFood', args: { target: 10 } },
       { name: 'smelt', args: { item: 'cooked_beef', count: 8, any: 'meat' } },
-    ],
-  },
-  {
-    id: 'torches',
-    label: 'coal and torches',
-    /**
-     * `|| count(coal) === 0` made this rung true the instant she spawned, so she was
-     * sent down to mine iron with no light at all — which is how most of the deaths
-     * happened. Now it is a real objective, but an optional one: no coal on the surface
-     * is normal, and branch mining picks coal up on the way down regardless.
-     */
-    optional: true,
-    done: (bot) => ownedCount(bot, 'torch') >= 16,
-    /**
-     * A torch is coal AND a stick. She reached this rung holding 27 coal and zero logs,
-     * so every craft failed on "need 1x stick" — the wood has to be part of the rung.
-     */
-    actions: (bot) => [
-      ...(logs(bot) + Math.floor(planks(bot) / 4) < 2 ? [{ name: 'chopWood', args: { count: 6 } }] : []),
-      { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true } },
-      { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
-      { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
-    ],
-  },
-  {
-    id: 'shelter',
-    label: 'a safe place to log off',
-    done: (bot, ctx) => !!ctx.memory.all.bed || !!ctx.memory.all.shelterBuilt,
-    actions: () => [{ name: 'shelter', args: {} }],
-  },
-  {
-    id: 'bed',
-    label: 'wool, a bed, and a way to skip the night',
-    /**
-     * A real rung of its own. The old version tacked an optional bed craft onto the
-     * shelter rung, which never fired because 3 wool is not something she happens to
-     * be carrying — so she spent every night awake being shot at. Sheep first, then
-     * the bed, then actually sleep in it.
-     */
-    /**
-     * Optional. A biome with no sheep made this unsatisfiable, and because it sits
-     * before the iron rung it walled the entire ladder off — she retried getWool
-     * forever and never mined a single ore. A bed is a comfort, not a prerequisite.
-     */
-    optional: true,
-    done: (bot, ctx) => !!ctx.memory.all.bed || countAny(bot, ...BED_NAMES) > 0 || owns(bot, 'white_bed'),
-    actions: () => [
-      { name: 'getWool', args: { count: 3 } },
-      { name: 'craft', args: { item: 'white_bed', count: 1, optional: true } },
-      { name: 'placeBed', args: {} },
     ],
   },
   {
@@ -376,10 +358,16 @@ export const LADDER = [
      * trip ended early with "pickaxe dying" and the retry had no pickaxe at all.
      */
     actions: (bot, ctx) => [
+      // Check the furnace first. A live run had 24 raw_iron and 9 ingots stranded in one
+      // while the ladder sent her back down the mine for iron she already owned.
+      { name: 'emptyFurnace', args: {} },
       { name: 'craft', args: { item: 'stone_pickaxe', count: 3, optional: true } },
       { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
       { name: 'craft', args: { item: 'crafting_table', count: 1, optional: true } },
-      { name: 'branchMine', args: { targetY: ctx.config.ironY, ore: 'iron_ore', count: IRON_TARGET + 3 } },
+      // Exactly the target, not target+3. Asking for three more ore blocks than the rung
+      // needs meant she kept mining for seventeen minutes after the budget was already
+      // satisfied, because the action's goal and the rung's goal disagreed.
+      { name: 'branchMine', args: { targetY: ctx.config.ironY, ore: 'iron_ore', count: IRON_TARGET } },
     ],
   },
   {
@@ -392,6 +380,16 @@ export const LADDER = [
      */
     done: (bot) => wearingFullIron(bot) && pickTier(bot) >= 3 && swordTier(bot) >= 3 && owns(bot, 'shield'),
     actions: () => [
+      /**
+       * FUEL FIRST. Smelting 33 iron needs about 5 coal, or 22 planks.
+       * A live run got 33 ore out of the ground and then stalled on
+       *   smelting 33x raw_iron -> iron_ingot (6x oak_log as fuel)
+       * which is nine items of burn for a thirty-three item job. Moving `torches` after
+       * this rung fixed reaching iron but left her with no coal at the moment she needed
+       * it most. She is already underground with a pickaxe, so coal is cheap here.
+       */
+      { name: 'mine', args: { block: 'coal_ore', count: 8, optional: true } },
+      { name: 'chopWood', args: { count: 8, optional: true } },
       // Come up and do the smelting and crafting at camp, in daylight, rather than
       // standing at Y=11 in the dark with no armour on while a furnace burns.
       { name: 'home', args: {} },
@@ -404,6 +402,62 @@ export const LADDER = [
       { name: 'craft', args: { item: 'iron_boots', count: 1 } },
       { name: 'craft', args: { item: 'shield', count: 1 } },
       { name: 'equipBest', args: {} },
+    ],
+  },
+  {
+    id: 'torches',
+    label: 'coal and torches',
+    /**
+     * `|| count(coal) === 0` made this rung true the instant she spawned, so she was
+     * sent down to mine iron with no light at all — which is how most of the deaths
+     * happened. Now it is a real objective, but an optional one: no coal on the surface
+     * is normal, and branch mining picks coal up on the way down regardless.
+     */
+    optional: true,
+    /**
+     * Torches are for PLACING. Gating on 16 held meant she made 16, put one down while
+     * sheltering, dropped to 15 and was sent back to chop more wood for sticks — the
+     * live run bounced torches -> shelter -> torches. Eight in the pack is plenty to
+     * start a mining trip, and a stack of coal means she can always make more.
+     */
+    done: (bot) => ownedCount(bot, 'torch') >= 8 || (count(bot, 'coal') >= 6 && count(bot, 'stick') >= 4),
+    /**
+     * A torch is coal AND a stick. She reached this rung holding 27 coal and zero logs,
+     * so every craft failed on "need 1x stick" — the wood has to be part of the rung.
+     */
+    actions: (bot) => [
+      ...(logs(bot) + Math.floor(planks(bot) / 4) < 2 ? [{ name: 'chopWood', args: { count: 6 } }] : []),
+      { name: 'mine', args: { block: 'coal_ore', count: 6, optional: true } },
+      { name: 'craft', args: { item: 'stick', count: 8, optional: true } },
+      { name: 'craft', args: { item: 'torch', count: 16, optional: true } },
+    ],
+  },
+  {
+    id: 'shelter',
+    label: 'a safe place to log off',
+    done: (bot, ctx) => !!ctx.memory.all.bed || !!ctx.memory.all.shelterBuilt,
+    actions: () => [{ name: 'shelter', args: {} }],
+  },
+  {
+    id: 'bed',
+    label: 'wool, a bed, and a way to skip the night',
+    /**
+     * A real rung of its own. The old version tacked an optional bed craft onto the
+     * shelter rung, which never fired because 3 wool is not something she happens to
+     * be carrying — so she spent every night awake being shot at. Sheep first, then
+     * the bed, then actually sleep in it.
+     */
+    /**
+     * Optional. A biome with no sheep made this unsatisfiable, and because it sits
+     * before the iron rung it walled the entire ladder off — she retried getWool
+     * forever and never mined a single ore. A bed is a comfort, not a prerequisite.
+     */
+    optional: true,
+    done: (bot, ctx) => !!ctx.memory.all.bed || countAny(bot, ...BED_NAMES) > 0 || owns(bot, 'white_bed'),
+    actions: () => [
+      { name: 'getWool', args: { count: 3 } },
+      { name: 'craft', args: { item: 'white_bed', count: 1, optional: true } },
+      { name: 'placeBed', args: {} },
     ],
   },
   {
