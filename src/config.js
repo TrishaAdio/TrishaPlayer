@@ -71,6 +71,11 @@ export const config = {
     // 'self_defence' = fight back + defend owner only. 'free' = duel anyone.
     pvpMode: process.env.PVP_MODE || 'self_defence',
   },
+  viewer: {
+    // Set VIEWER_PORT to serve a live browser view of what she is doing. Off by default.
+    port: num(process.env.VIEWER_PORT, 0),
+    firstPerson: bool(process.env.VIEWER_FIRST_PERSON, false),
+  },
   verbose: bool(process.env.VERBOSE, true),
   memoryDir: path.join(ROOT, 'memory'),
 };

@@ -162,6 +162,25 @@ function setup(bot) {
    */
   installReporter(bot, brain, executor, { everyMs: 10000 });
 
+  /**
+   * LIVE VIEWER — watch her play in a browser.
+   *
+   * Off unless VIEWER_PORT is set, and wrapped so a viewer problem can never take the bot
+   * down with it. prismarine-viewer renders from the chunks she already has, so it costs
+   * nothing in-game and shows exactly what she can see.
+   */
+  if (config.viewer.port) {
+    setTimeout(async () => {
+      try {
+        const { mineflayer: mineflayerViewer } = await import('prismarine-viewer');
+        mineflayerViewer(bot, { port: config.viewer.port, firstPerson: config.viewer.firstPerson });
+        log.info(`live viewer on http://0.0.0.0:${config.viewer.port} (${config.viewer.firstPerson ? 'first person' : 'third person'})`);
+      } catch (err) {
+        log.warn(`viewer failed to start (carrying on without it): ${err.message}`);
+      }
+    }, 4000);
+  }
+
   // 6. Go.
   setTimeout(() => {
     equipBest(bot).catch(() => {});
