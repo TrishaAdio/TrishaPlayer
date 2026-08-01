@@ -49,14 +49,43 @@ const countAllSlots = (bot, name) => bot.inventory.items().reduce((n, i) => (i.n
  * Pick the fuel that can actually finish the batch, preferring proper fuels over
  * burning the planks she needs for crafting.
  */
-function chooseFuel(bot, batch) {
+function chooseFuel(bot, batch, { reserveWood = 4 } = {}) {
+  /**
+   * DO NOT BURN THE WOOD SHE BUILDS WITH.
+   *
+   * Observed live: "smelting 4x mutton -> cooked_beef (3x birch_log as fuel)" and then
+   * "(1x oak_planks as fuel)", leaving her with logs 0. Cooking mutton she could have eaten
+   * raw cost her the sticks for a pickaxe, the planks for a bench, and the fuel to smelt 33
+   * iron. Wood is her tool material first and a fuel second, so a few logs are ring-fenced
+   * and only spent when nothing else will do.
+   */
+  const woodUnits = (name) => (/_planks$/.test(name) ? 0.25 : 1); // logs-equivalent per unit
+  const logsEquivalent =
+    Object.keys(PLANK_FROM_LOG).reduce((n, l) => n + countAllSlots(bot, l), 0) +
+    Math.floor(Object.values(PLANK_FROM_LOG).reduce((n, p) => n + countAllSlots(bot, p), 0) / 4);
+
   const owned = FUELS.map((name) => {
-    const have = countAllSlots(bot, name);
+    let have = countAllSlots(bot, name);
     if (!have) return null;
+    const isWood = /_planks$|_log$/.test(name);
+    if (isWood) {
+      // Only the surplus above the reserve is available to burn.
+      const spareLogs = Math.max(0, logsEquivalent - reserveWood);
+      have = Math.min(have, Math.floor(spareLogs / woodUnits(name)) || 0);
+      if (have <= 0) return null;
+    }
     const per = fuelYield(name);
-    return { name, have, per, units: Math.max(1, Math.ceil(batch / per)), covers: have * per };
+    return { name, have, per, units: Math.max(1, Math.ceil(batch / per)), covers: have * per, isWood };
   }).filter(Boolean);
   if (!owned.length) return null;
+
+  // Proper fuels first, wood only if there is nothing better.
+  const proper = owned.filter((f) => !f.isWood);
+  if (proper.length) {
+    const enoughProper = proper.filter((f) => f.covers >= batch);
+    const pick = (enoughProper.length ? enoughProper : proper.sort((a, b) => b.covers - a.covers))[0];
+    return { ...pick, units: Math.min(pick.have, pick.units) };
+  }
   // Anything that can cover the whole batch wins; otherwise take the biggest burn.
   const enough = owned.filter((f) => f.covers >= batch);
   const pick = (enough.length ? enough : owned.sort((a, b) => b.covers - a.covers))[0];
